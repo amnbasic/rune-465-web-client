@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Client-TS</title>
+
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=0.7" />
+
+        <style>
+            html {
+                touch-action: manipulation;
+            }
+
+            body,
+            td,
+            p {
+                font-family: Arial, Helvetica, sans-serif;
+                font-size: 12px;
+                color: white;
+            }
+
+            body {
+                margin: 0px 0px;
+                overflow: auto;
+                background-color: black;
+            }
+
+            #game {
+                padding-left: 0;
+                padding-right: 0;
+                margin-left: auto;
+                margin-right: auto;
+                display: block;
+            }
+
+            canvas {
+                display: block;
+                /* touch-action: none; */
+                -webkit-touch-callout: none;
+                -webkit-user-select: none;
+                -khtml-user-select: none;
+                -moz-user-select: none;
+                -ms-user-select: none;
+                user-select: none;
+                outline: none;
+                -webkit-tap-highlight-color: rgba(255, 255, 255, 0);
+                z-index: -1;
+                image-rendering: pixelated;
+            }
+
+            html:-webkit-full-screen {
+                background-color: black !important;
+            }
+        </style>
+    </head>
+
+    <body>
+        <center>
+            <div id="game">
+                <canvas id="canvas"> Your browser is not capable of running our web client. </canvas>
+            </div>
+        </center>
+
+        <!-- DEV debug overlay: mirrors console + uncaught errors + promise rejections onto the page,
+             since the browser devtools console isn't reachable from the dev harness. Remove later. -->
+        <div id="dbg" style="position:fixed;top:0;left:0;max-width:52ch;max-height:100vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.78);color:#5f5;font:10px/1.25 monospace;padding:4px;white-space:pre-wrap;pointer-events:auto;user-select:text;-webkit-user-select:text"></div>
+        <script>
+            (function () {
+                var el = document.getElementById('dbg');
+                var lines = []; // {text, n}
+                var post = []; // raw lines queued for POST to the dev server (-> web-client/dbg.log)
+                function flushPost() {
+                    if (post.length === 0) return;
+                    var body = post.join('\n') + '\n';
+                    post = [];
+                    try { fetch('/dbg', { method: 'POST', body: body, keepalive: true }).catch(function () {}); } catch (e) {}
+                }
+                setInterval(flushPost, 120);
+                window.addEventListener('beforeunload', function () {
+                    try { if (post.length) navigator.sendBeacon('/dbg', post.join('\n') + '\n'); } catch (e) {}
+                });
+                function fmt(a) {
+                    try {
+                        if (a && a.stack) return String(a.stack);
+                        if (typeof a === 'object') return JSON.stringify(a);
+                        return String(a);
+                    } catch (e) { return '<?>'; }
+                }
+                function render() {
+                    el.textContent = lines.map(function (l) { return l.n > 1 ? l.text + '  x' + l.n : l.text; }).join('\n');
+                }
+                function push(tag, args) {
+                    var text = tag + ' ' + Array.prototype.map.call(args, fmt).join(' ');
+                    // Send IMMEDIATELY per line via sendBeacon: it survives a hard-blocked event loop
+                    // (sync infinite loop), unlike the batched fetch which never flushes if blocked.
+                    try { navigator.sendBeacon('/dbg', text + '\n'); } catch (e) {}
+                    var last = lines[lines.length - 1];
+                    if (last && last.text === text) { last.n++; render(); return; } // dedupe consecutive
+                    lines.push({ text: text, n: 1 });
+                    if (lines.length > 120) lines.shift();
+                    render();
+                }
+                ['log', 'warn', 'error'].forEach(function (k) {
+                    var o = console[k].bind(console);
+                    console[k] = function () { push(k.toUpperCase(), arguments); o.apply(console, arguments); };
+                });
+                window.addEventListener('error', function (e) { push('UNCAUGHT', [e.message + ' @ ' + e.filename + ':' + e.lineno]); });
+                window.addEventListener('unhandledrejection', function (e) { push('REJECT', [(e.reason && e.reason.stack) || e.reason]); flushPost(); });
+                push('DBG', ['==== SESSION ' + new Date().toISOString() + ' ====']);
+                flushPost();
+            })();
+        </script>
+        <script type="module">
+            import { Client } from './client/client.js';
+
+            (() => {
+                new Client();
+            })();
+        </script>
+    </body>
+</html>

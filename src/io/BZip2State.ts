@@ -1,0 +1,34 @@
+export default class BZip2State {
+    readonly limit: Int32Array[] = Array.from({ length: 6 }, () => new Int32Array(258));
+    readonly inUse16: boolean[] = new Array(16).fill(false);
+    readonly minLens: Int32Array = new Int32Array(6);
+    next_in: number = 0;
+    readonly selector: Int8Array = new Int8Array(18002);
+    readonly len: Int8Array[] = Array.from({ length: 6 }, () => new Int8Array(258));
+    readonly selectorMtf: Int8Array = new Int8Array(18002);
+    k0: number = 0;
+    readonly cftab: Int32Array = new Int32Array(257);
+    readonly seqToUnseq: Int8Array = new Int8Array(256);
+    readonly unzftab: Int32Array = new Int32Array(256);
+    tPos: number = 0;
+    origPtr: number = 0;
+    state_out_len: number = 0;
+    total_in_lo32: number = 0;
+    save_nblock: number = 0;
+    readonly mtfa: Int8Array = new Int8Array(4096);
+    next_out: number = 0;
+    readonly base: Int32Array[] = Array.from({ length: 6 }, () => new Int32Array(258));
+    readonly inUse: boolean[] = new Array(256).fill(false);
+    readonly perm: Int32Array[] = Array.from({ length: 6 }, () => new Int32Array(258));
+    readonly mtfbase: Int32Array = new Int32Array(16);
+    state_out_ch: number = 0;
+    total_out_lo32: number = 0;
+    nInUse: number = 0;
+    avail_out: number = 0;
+    bsLive: number = 0;
+    blockSize100k: number = 0;
+    bsBuff: number = 0;
+    c_nblock_used: number = 0;
+    decompressed: Uint8Array | Int8Array | null = null;
+    stream: Uint8Array | Int8Array | null = null;
+}
