@@ -3,6 +3,7 @@ import '#3rdparty/audio.js';
 import JagException from '#/callstack/JagException.js';
 import ClientBuild from '#/client/ClientBuild.js';
 import ClanChannelUser from '#/client/ClanChannelUser.js';
+import ControlBar, { TABS } from '#/client/ControlBar.js';
 import ClientScript from '#/client/ClientScript.js';
 import ClientDynamicProvider from '#/client/ClientDynamicProvider.js';
 import ClientInvCache from '#/client/ClientInvCache.js';
@@ -136,6 +137,16 @@ export class Client extends GameShell {
     static mouseTrackedDelta: number = 0;
     static focusIn: boolean = true;
     static showFps: boolean = false;
+
+    // QoL typing gate: while NOT typing, WASD drives the camera only (the keys are
+    // eaten before they reach the chat input), the side-tab hotkeys fire, and Enter opens
+    // the chatbox; '/' ':' ';' '?' open it and pass through. Enter (send) or Escape leaves
+    // typing mode. Toggle WASD with ::wasd, the title-screen button or the control bar.
+    static wasdMode: boolean = true;
+    static typingMode: boolean = false;
+    // a keydown consumed by the gate is followed by its keypress char - drop that too
+    private static swallowChar: boolean = false;
+
     static rebootTimer: number = 0;
     static readonly field1171: (HintArrow | null)[] = new Array(4).fill(null);
 
@@ -495,7 +506,6 @@ export class Client extends GameShell {
     static field2402: Int32Array = new Int32Array(0);
     static dbgGameDrawErrs: number = 0; // DEV: throttle gameDraw crash logging
     static dbgSeenTcp: Set<number> = new Set(); // DEV: dedupe tcpIn parse errors by opcode
-    static dbgGameLoopN: number = 0; // DEV: gameLoop iteration counter
     static layoutGuard: number = 0; // SAFETY: bounds computeLayerLayout recursion so a bad parentId can't hard-freeze the tab
     static field10: bigint = 0n;
     static field3519: bigint = 0n;
@@ -569,6 +579,13 @@ export class Client extends GameShell {
         if (!this.checkhost()) {
             return;
         }
+        // Load persisted client-side preferences before the first key is ever polled, and let
+        // the DOM control bar drive Client.wasdMode.
+        ControlBar.init();
+        Client.wasdMode = ControlBar.settings.wasd;
+        ControlBar.onWasdChange = (value: boolean): void => {
+            Client.wasdMode = value;
+        };
         let param = this.getParameter('worldid');
         if (param !== null) {
             const parsed = Number.parseInt(param, 10);
@@ -663,7 +680,6 @@ export class Client extends GameShell {
 
     override async mainloop() {
         Client.loopCycle++;
-        if (Client.loopCycle % 100 === 0) console.log('[dbg] loop=' + Client.loopCycle + ' state=' + Client.state);
         if (Client.loopCycle % 1000 === 1) {
             const now = new Date();
             Client.feedbackSeed = now.getHours() * 600 + now.getMinutes() * 10 + ((now.getSeconds() / 6) | 0);
@@ -695,17 +711,14 @@ export class Client extends GameShell {
         }
 
         if (Client.state === ClientMainState.GAME) {
-            if (Client.dbgGameLoopN++ % 50 === 0) console.log('[dbg] gameLoop start #' + Client.dbgGameLoopN);
             try {
                 await this.gameLoop();
             } catch (e) {
-                console.error('[dbg] gameLoop threw:', e);
+                console.error('gameLoop threw:', e);
             }
-            if (Client.dbgGameLoopN % 50 === 1) console.log('[dbg] gameLoop done #' + Client.dbgGameLoopN);
         } else if (Client.state === ClientMainState.RECONNECT) {
             await this.loginPoll();
         }
-        if (Client.state === 25) console.log('[dbg] mainloop END state=25');
     }
 
     // jag::oldscape::Client::MainRedraw
@@ -744,13 +757,11 @@ export class Client extends GameShell {
             }
         } else if (Client.state === ClientMainState.GAME) {
             try {
-                if (Client.dbgGameLoopN % 100 === 0) console.log('[dbg] gameDraw call');
                 this.gameDraw();
-                if (Client.dbgGameLoopN % 100 === 0) console.log('[dbg] gameDraw ok');
             } catch (e) {
-                // DEV: a broken 464 game-frame interface makes gameDraw throw; catching it keeps the
+                // A broken 464 game-frame interface makes gameDraw throw; catching it keeps the
                 // render loop (and the 3D scene) alive instead of crashing the tab. Log the first few.
-                if (Client.dbgGameDrawErrs++ < 4) console.error('[dbg] gameDraw threw:', e);
+                if (Client.dbgGameDrawErrs++ < 4) console.error('gameDraw threw:', e);
             }
         } else if (Client.state === ClientMainState.RECONNECT) {
             Client.messageBox(Text.conlost + '<br>' + Text.attempt_to_reestablish, false);
@@ -843,13 +854,9 @@ export class Client extends GameShell {
 
         this.js5ServiceBusy = true;
         try {
-            if (Client.state === 25) console.log('[dbg] svc enter state25');
             const ok = await this.js5Net.loop();
-            if (Client.state === 25) console.log('[dbg] svc js5loop done ok=' + ok);
             if (!ok) {
-                console.log('[dbg] svc js5connect start');
                 await this.js5connect();
-                console.log('[dbg] svc js5connect done');
             }
         } finally {
             this.js5ServiceBusy = false;
@@ -2035,6 +2042,9 @@ export class Client extends GameShell {
 
         Client.keypresses = 0;
         while (ClientKeyboardListener.pollKey() && Client.keypresses < 128) {
+            if (Client.filterKey(ClientKeyboardListener.code, ClientKeyboardListener.ch)) {
+                continue;
+            }
             Client.keypressKeycodes[Client.keypresses] = ClientKeyboardListener.code;
             Client.keypressKeychars[Client.keypresses] = ClientKeyboardListener.ch;
             Client.keypresses++;
@@ -2284,7 +2294,6 @@ export class Client extends GameShell {
 
     // jag::oldscape::Client::LoginDone
     static loginDone(): void {
-        console.log('[dbg] loginDone -> entering game, psize=' + Client.psize + ' ptype=' + Client.ptype);
         Client.prevMouseClickTime = 0;
         Client.mouseTracking.length = 0;
         Client.mouseTrackedDelta = 0;
@@ -2397,6 +2406,7 @@ export class Client extends GameShell {
         }
         Client.clientpalette = LocType.clientpalette = NpcType.clientpalette = ObjType.clientpalette = new Int16Array(256);
         Client.sendCamera = true;
+        Client.typingMode = false;
         Client.moveAction = Text.walkhere;
     }
 
@@ -2698,6 +2708,12 @@ export class Client extends GameShell {
 
     // jag::oldscape::Client::DoCheat
     static doCheat(arg0: string): void {
+        // available to everyone (before the staff gate): toggle the WASD camera keys
+        if (arg0.toLowerCase() === '::wasd') {
+            Client.setWasdMode(!Client.wasdMode);
+            Client.addChat('WASD camera ' + (Client.wasdMode ? 'enabled' : 'disabled') + '.', 0, '');
+            return;
+        }
         if (Client.staffmodlevel >= 2) {
             if (arg0.toLowerCase() === '::gc') {
                 const memory = (globalThis.performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
@@ -2780,19 +2796,22 @@ export class Client extends GameShell {
         }
 
         // QoL: WASD aliases the arrow keys for camera control (A=48, D=50, W=33, S=49 in the
-        // client's internal keycodes). Chat typing is unaffected (separate typed-char queue).
+        // client's internal keycodes). The alias is gated by Client.filterKey(): while typing
+        // (Enter / '/' / ':' opened the chatbox) WASD types instead of panning. The arrow keys
+        // (96-99) are never gated, so they still steer the camera mid-sentence.
+        const wasd: boolean = Client.wasdMode && !Client.typingMode;
         const var0: number = Client.localPlayer!.z + Client.macroCameraZ;
-        if (ClientKeyboardListener.keyHeld[96] || ClientKeyboardListener.keyHeld[48]) {
+        if (ClientKeyboardListener.keyHeld[96] || (wasd && ClientKeyboardListener.keyHeld[48])) {
             Client.orbitCameraYawVelocity += ((-Client.orbitCameraYawVelocity - 24) / 2) | 0;
-        } else if (ClientKeyboardListener.keyHeld[97] || ClientKeyboardListener.keyHeld[50]) {
+        } else if (ClientKeyboardListener.keyHeld[97] || (wasd && ClientKeyboardListener.keyHeld[50])) {
             Client.orbitCameraYawVelocity += ((24 - Client.orbitCameraYawVelocity) / 2) | 0;
         } else {
             Client.orbitCameraYawVelocity = (Client.orbitCameraYawVelocity / 2) | 0;
         }
 
-        if (ClientKeyboardListener.keyHeld[98] || ClientKeyboardListener.keyHeld[33]) {
+        if (ClientKeyboardListener.keyHeld[98] || (wasd && ClientKeyboardListener.keyHeld[33])) {
             Client.orbitCameraPitchVelocity += ((12 - Client.orbitCameraPitchVelocity) / 2) | 0;
-        } else if (ClientKeyboardListener.keyHeld[99] || ClientKeyboardListener.keyHeld[49]) {
+        } else if (ClientKeyboardListener.keyHeld[99] || (wasd && ClientKeyboardListener.keyHeld[49])) {
             Client.orbitCameraPitchVelocity += ((-Client.orbitCameraPitchVelocity - 12) / 2) | 0;
         } else {
             Client.orbitCameraPitchVelocity = (Client.orbitCameraPitchVelocity / 2) | 0;
@@ -4181,9 +4200,7 @@ export class Client extends GameShell {
                     var10++;
                 }
             }
-            console.log('[dbg] rebuildN xtea=' + var1 + ' regionX=' + var7 + ' regionY=' + var4 + ' localX=' + var6 + ' localY=' + var9 + ' level=' + var8);
             Client.startRebuild(var8, var9, var7, var4, var6);
-            console.log('[dbg] startRebuild returned, state=' + Client.state);
             return;
         }
         // 464 RebuildConstructed (op 222) header — 9 bytes (Java InteractiveObject.method1086:
@@ -4378,7 +4395,6 @@ export class Client extends GameShell {
 
     // jag::oldscape::Client::MapBuildLoop
     static mapBuildLoop(): void {
-        console.log('[dbg] mBL enter');
         Client.preventTimeout(false);
         let var0: boolean = true;
         Client.field3754 = 0;
@@ -4397,11 +4413,6 @@ export class Client extends GameShell {
                     Client.field3754++;
                 }
             }
-        }
-        {
-            const m = ClientBuild.field3221!.filter(x => x !== null).length;
-            const l = ClientBuild.field774!.filter(x => x !== null).length;
-            console.log('[dbg] mBL files m=' + m + '/' + ClientBuild.field3221!.length + ' l=' + l + '/' + ClientBuild.field774!.length + ' waiting=' + Client.field3754 + ' var0=' + var0);
         }
         if (!var0) {
             Client.field3861 = 1;
@@ -4422,7 +4433,6 @@ export class Client extends GameShell {
                 var2 = var2 && var7;
             }
         }
-        console.log('[dbg] mBL checkLoc ' + (var2 ? 'OK->build scene' : 'waiting loc-models') + ' missing=' + Client.field2045);
         if (!var2) {
             Client.field3861 = 2;
             return;
@@ -4498,7 +4508,6 @@ export class Client extends GameShell {
                 }
             }
         }
-        console.log('[dbg] scene BUILT -> setMainState(GAME=30)');
         Client.setMainState(30);
         Client.doAudio();
         // 464 has no client map-build-complete packet; sending rev-500 opcode 213 hit the server's
@@ -5438,7 +5447,6 @@ export class Client extends GameShell {
                 Client.in.pos = 0;
                 Client.ptype = Client.in.g1Enc();
                 Client.psize = Statics.field224[Client.ptype]; // 464 size table
-                if (Client.state === 30) console.log('[dbg] pkt raw=' + Client.ptype + ' sz=' + Client.psize + ' ->' + Statics.serverOpcode464to500[Client.ptype]);
                 Client.ptype = Statics.serverOpcode464to500[Client.ptype]; // 464 opcode -> rev-500 dispatch (5000 = skip)
                 available--;
             }
@@ -5968,7 +5976,6 @@ export class Client extends GameShell {
                 // (548 = fixed game frame, 549 = welcome). Sets toplevelinterface so gameDraw has a
                 // component tree to render — window 548 carries the clientCode-1337 3D viewport.
                 const windowId: number = Client.in.g2_alt3();
-                console.log('[dbg] window-pane -> toplevelinterface=' + windowId + ' ifType=' + (IfType.get(windowId) !== null ? 'ok' : 'NULL'));
                 Client.toplevelinterface = windowId;
                 Client.ifAnimReset(windowId);
                 Client.computeTopLevelInterfaceLayout();
@@ -6143,7 +6150,6 @@ export class Client extends GameShell {
                 const componentId: number = ((packed & 0xffff) << 16) | ((packed >>> 16) & 0xffff);
                 const interfaceId: number = Client.in.g2();
                 const mode: number = Client.in.g1();
-                console.log('[dbg] if_open sub: win=' + (componentId >> 16) + ' slot=' + (componentId & 0xffff) + ' iface=' + interfaceId);
                 const existing = Client.subinterfaces.find(BigInt(componentId));
                 if (existing !== null) {
                     Client.closeSubInterface(existing, existing.id !== interfaceId);
@@ -8642,6 +8648,98 @@ export class Client extends GameShell {
         }
     }
 
+    /**
+     * QoL typing gate. True = the key was consumed here (drop it from the queue).
+     * Branch order is load-bearing — see the comments on each branch.
+     */
+    private static filterKey(code: number, ch: number): boolean {
+        if (Client.toplevelinterface !== 548) {
+            // login/title/other panes: never gate, and never stay stuck in typing mode
+            Client.typingMode = false;
+            return false;
+        }
+        // a consumed keydown is followed by its keypress char — swallow that too (keydown and
+        // keypress are queued adjacently by the same physical key, so one flag is enough)
+        if (code === -1 && ch !== -1 && Client.swallowChar) {
+            Client.swallowChar = false;
+            return true;
+        }
+        if (code !== -1) {
+            // any fresh keydown invalidates a pending swallow (must precede the consuming branches)
+            Client.swallowChar = false;
+        }
+        if (Client.subinterfaces.find(BigInt((548 << 16) | 79)) !== null) {
+            // chatbox dialog up (name/amount input): everything types
+            Client.typingMode = false;
+            return false;
+        }
+        if (Client.typingMode) {
+            if (code === 84 || code === 0) {
+                // Enter (the chat input sends) / Escape: leave typing, pass through
+                Client.typingMode = false;
+            }
+            return false;
+        }
+        if (code === 0 && Client.hasOpenModal()) {
+            // Escape closes an open interface (bank, shop, dialogue, ...), as in vanilla.
+            // Gated on something actually being open so a stray Esc does not spam CLOSE_MODAL
+            // at the server. Sits AFTER the typingMode branch above, so Esc while typing leaves
+            // typing mode first and only a second press closes the interface.
+            Client.closeModal();
+            Client.swallowChar = true;
+            return true;
+        }
+        if (ch === 47 || ch === 58 || ch === 59 || ch === 63) {
+            // '/' ':' ';' '?': start typing, let the char reach the chat input
+            Client.typingMode = true;
+            return false;
+        }
+        if (code === 84) {
+            // Enter: start typing (consumed — nothing pending to send)
+            Client.typingMode = true;
+            return true;
+        }
+        if (code !== -1) {
+            // Side-tab hotkeys. Data-driven: ControlBar owns the key -> tab table (defaults in
+            // ControlBar.DEFAULT_KEYS, user overrides persisted to localStorage), so this branch
+            // never has to know which key does what. Consumed so the digit can't also type.
+            const tab: number = ControlBar.tabForKey(code);
+            if (tab >= 0) {
+                Client.openTab(tab);
+                Client.swallowChar = true;
+                return true;
+            }
+        }
+        if (Client.wasdMode) {
+            // WASD camera keys: consume so they never type (keyHeld — which drives the
+            // camera — is a separate buffer and is unaffected by eating the queue entry).
+            if (code === 33 || code === 48 || code === 49 || code === 50) {
+                Client.swallowChar = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Switch the side panel to a tab by running the same op-1 hook a click on its sidebar icon
+     * would run (ControlBar.TABS holds the component ids). 465 if3 components carry no hotkeys
+     * block (IfType.decode3), so unlike vanilla there is nothing in the cache to drive this.
+     */
+    static openTab(tab: number): void {
+        const entry = TABS[tab];
+        if (entry === undefined) {
+            return;
+        }
+        Client.ifButtonX(1, '', -1, entry.com);
+    }
+
+    /** Single entry point for WASD toggling, so the cheat, the title button and the bar agree. */
+    static setWasdMode(enabled: boolean): void {
+        Client.wasdMode = enabled;
+        ControlBar.setWasd(enabled);
+    }
+
     // jag::oldscape::minimenu::Minimenu::GameLoop
     mouseLoop(): void {
         if (Client.objDragCom !== null || Client.dragCom !== null) {
@@ -10136,9 +10234,14 @@ export class Client extends GameShell {
             Client.computeInterfaceLayout(arg7, id, arg0, false);
         }
         Client.componentDrawTime = Client.loopCycle;
-        if (arg3 === 0) {
-            Client.componentDrawCount = 0;
-        }
+        // PORT BUG REMOVED: this used to be `if (arg3 === 0) Client.componentDrawCount = 0;`.
+        // The Java 464 client's equivalent (Region.method53) has NO such reset — `componentDrawCount`
+        // (anInt2493) is zeroed in exactly one place, gameDraw/Class24, and nowhere else.
+        // Resetting it here wiped the blit list whenever a sub-interface was drawn under a pane whose
+        // root sits at draw slot 0 (e.g. the welcome screen, interface 378 inside window pane 549:2).
+        // mainredraw() only blits `componentDrawCount` rects, so the canvas froze on its last frame —
+        // the "login hangs at Loading 100%" bug. Keeping the reset also made the fix timing-dependent:
+        // the pane and the if_open had to land in different frames to freeze the redraw latch true.
 
         Client.dragChildren = null;
         let ready: boolean = this.drawLayer(IfType.list[id], arg5, arg2, arg3, arg0, arg6, arg4, -1, arg7);
@@ -10261,9 +10364,6 @@ export class Client extends GameShell {
                 // 464: this single hook draws frame + map circle + compass (Java method679);
                 // the 465 ct-1338 layer has no graphic so the rev-500 mask gate never fires.
                 try {
-                    if (Client.loopCycle % 500 === 0 && (Client.mapback === null || Client.field2010 === null)) {
-                        console.log('[dbg] minimap skip: mapback=' + (Client.mapback !== null) + ' field2010=' + (Client.field2010 !== null));
-                    }
                     // mapback is loaded during boot (name tables are gone by now)
                     if (Client.mapback !== null && Client.field2010 !== null) {
                         Pix2D.setClipping(childX, childY, childX + Client.mapbackCw, childY + Client.mapbackCh);
@@ -10273,8 +10373,9 @@ export class Client extends GameShell {
                         Client.drawCompass(child.drawCount, childX, childY, Client.compassMaskCom!);
                     }
                 } catch (e) {
+                    // throttled: this runs per frame, so an every-frame failure must not flood the console
                     if (Client.loopCycle % 100 === 0) {
-                        console.log('[dbg] minimap draw error: ' + (e as Error).message + ' @ ' + (((e as Error).stack ?? '').split('\n')[1] ?? '').trim());
+                        console.error('minimap draw error:', e);
                     }
                 }
                 Pix2D.setClipping(clipLeft, clipTop, clipRight, clipBottom);
@@ -11883,6 +11984,19 @@ export class Client extends GameShell {
         }
     }
 
+    /**
+     * True when a modal sub-interface (type 0) is currently open — i.e. when there is something
+     * for Escape / closeModal() to close. Mirrors the loop closeModal() itself walks.
+     */
+    static hasOpenModal(): boolean {
+        for (let sub = Client.subinterfaces.search() as SubInterface | null; sub !== null; sub = Client.subinterfaces.findnext() as SubInterface | null) {
+            if (sub.type === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // jag::oldscape::Client::CloseModal
     static closeModal(): void {
         Client.out.p1Enc(ClientProt.CLOSE_MODAL);
@@ -12042,20 +12156,16 @@ export class Client extends GameShell {
     static loadMapback(): void {
         const sprites = Client.sprites;
         if (sprites === null || sprites.groupNameHashTable === null) {
-            console.log('[dbg] mapback: name table unavailable');
             return; // name tables absent (pre-ref-decode or post-boot discard)
         }
         const gid = sprites.getGroupId('mapback');
         if (gid < 0) {
-            console.log('[dbg] mapback: group not found');
             return;
         }
         const fid = sprites.getFileId('', gid);
         if (!PixLoader.depack(sprites, gid, fid)) {
-            console.log('[dbg] mapback: depack failed gid=' + gid + ' fid=' + fid);
             return;
         }
-        console.log('[dbg] mapback: loaded gid=' + gid + ' canvas=' + PixLoader.owi + 'x' + PixLoader.ohi);
         // full-canvas palette indices (index 0 = transparent hole)
         const cw = PixLoader.owi;
         const ch = PixLoader.ohi;
@@ -12682,7 +12792,6 @@ export class Client extends GameShell {
             if (Client.layoutGuard++ > 96) {
                 // A malformed parentId would otherwise recurse forever and freeze the browser.
                 Client.layoutGuard--;
-                console.log('[dbg] computeLayerLayout depth guard tripped (bad parentId?)');
                 return;
             }
             const var6 = arg0;

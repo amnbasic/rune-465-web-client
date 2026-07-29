@@ -51,6 +51,152 @@
             html:-webkit-full-screen {
                 background-color: black !important;
             }
+
+            /* Controls panel under the canvas (populated by src/client/ControlBar.ts).
+               Styled to sit with the client rather than beside it: same 765px width, RS-ish
+               stone/parchment palette, and everything wraps so it can never overflow. */
+            #controlbar {
+                width: 765px;
+                box-sizing: border-box;
+                margin: 6px auto 16px auto;
+                padding: 8px 12px 10px 12px;
+                text-align: left;
+                font: 11px/1.6 Arial, Helvetica, sans-serif;
+                color: #b9ac93;
+                background: linear-gradient(#2a2521, #1e1a16);
+                border: 1px solid #3b332a;
+                border-radius: 4px;
+                box-shadow: inset 0 1px 0 #40382e;
+                user-select: none;
+            }
+
+            /* One titled row per control group */
+            #controlbar .cb-section {
+                display: flex;
+                align-items: baseline;
+                gap: 10px;
+                padding: 5px 0;
+            }
+
+            #controlbar .cb-section-ruled {
+                border-top: 1px solid #332c25;
+            }
+
+            #controlbar .cb-title {
+                flex: 0 0 78px;
+                color: #8a7d68;
+                font-size: 10px;
+                letter-spacing: 0.09em;
+                text-transform: uppercase;
+            }
+
+            /* Items wrap instead of pushing the panel wider than the canvas */
+            #controlbar .cb-items {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 5px 6px;
+                min-width: 0;
+            }
+
+            #controlbar .cb-label {
+                color: #b9ac93;
+            }
+
+            /* Keycap + tab name, e.g. [1] Combat */
+            #controlbar .cb-key {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+                padding: 2px 7px 2px 3px;
+                font: inherit;
+                color: #cbbfa6;
+                background: #241f1a;
+                border: 1px solid #3d352c;
+                border-radius: 3px;
+                cursor: pointer;
+            }
+
+            #controlbar .cb-key:hover {
+                color: #ffe6a8;
+                border-color: #6b5c46;
+                background: #2c2620;
+            }
+
+            #controlbar .cb-cap {
+                min-width: 15px;
+                padding: 1px 0;
+                font: 10px/1 "Courier New", monospace;
+                text-align: center;
+                color: #f0d9a0;
+                background: #17130f;
+                border: 1px solid #4a4034;
+                border-radius: 2px;
+                box-shadow: 0 1px 0 #0d0b09;
+            }
+
+            #controlbar .cb-key-unbound .cb-cap {
+                color: #6d6355;
+            }
+
+            #controlbar .cb-key-capturing {
+                border-color: #c9a227;
+                background: #33291a;
+            }
+
+            #controlbar .cb-key-capturing .cb-cap {
+                color: #1a1510;
+                background: #ffcc4d;
+                border-color: #ffcc4d;
+            }
+
+            /* ON / OFF pill */
+            #controlbar .cb-toggle {
+                padding: 2px 9px;
+                font: bold 10px/1 Arial, Helvetica, sans-serif;
+                letter-spacing: 0.06em;
+                border-radius: 9px;
+                border: 1px solid;
+                cursor: pointer;
+            }
+
+            #controlbar .cb-on {
+                color: #0f1a0d;
+                background: #8fbf6a;
+                border-color: #a6d47f;
+            }
+
+            #controlbar .cb-off {
+                color: #9a9086;
+                background: #241f1a;
+                border-color: #3d352c;
+            }
+
+            #controlbar .cb-toggle:hover {
+                filter: brightness(1.15);
+            }
+
+            /* Plain text action (e.g. "defaults") */
+            #controlbar .cb-action {
+                padding: 2px 8px;
+                font: inherit;
+                color: #b9ac93;
+                background: #241f1a;
+                border: 1px solid #3d352c;
+                border-radius: 3px;
+                cursor: pointer;
+            }
+
+            #controlbar .cb-action:hover {
+                color: #ffe6a8;
+                border-color: #6b5c46;
+            }
+
+            /* Dimmed explanatory text rendered after a control (Control.hint) */
+            #controlbar .cb-hint {
+                color: #7b7264;
+                font-style: italic;
+            }
         </style>
     </head>
 
@@ -61,55 +207,9 @@
             </div>
         </center>
 
-        <!-- DEV debug overlay: mirrors console + uncaught errors + promise rejections onto the page,
-             since the browser devtools console isn't reachable from the dev harness. Remove later. -->
-        <div id="dbg" style="position:fixed;top:0;left:0;max-width:52ch;max-height:100vh;overflow:auto;z-index:99999;background:rgba(0,0,0,.78);color:#5f5;font:10px/1.25 monospace;padding:4px;white-space:pre-wrap;pointer-events:auto;user-select:text;-webkit-user-select:text"></div>
-        <script>
-            (function () {
-                var el = document.getElementById('dbg');
-                var lines = []; // {text, n}
-                var post = []; // raw lines queued for POST to the dev server (-> web-client/dbg.log)
-                function flushPost() {
-                    if (post.length === 0) return;
-                    var body = post.join('\n') + '\n';
-                    post = [];
-                    try { fetch('/dbg', { method: 'POST', body: body, keepalive: true }).catch(function () {}); } catch (e) {}
-                }
-                setInterval(flushPost, 120);
-                window.addEventListener('beforeunload', function () {
-                    try { if (post.length) navigator.sendBeacon('/dbg', post.join('\n') + '\n'); } catch (e) {}
-                });
-                function fmt(a) {
-                    try {
-                        if (a && a.stack) return String(a.stack);
-                        if (typeof a === 'object') return JSON.stringify(a);
-                        return String(a);
-                    } catch (e) { return '<?>'; }
-                }
-                function render() {
-                    el.textContent = lines.map(function (l) { return l.n > 1 ? l.text + '  x' + l.n : l.text; }).join('\n');
-                }
-                function push(tag, args) {
-                    var text = tag + ' ' + Array.prototype.map.call(args, fmt).join(' ');
-                    // Send IMMEDIATELY per line via sendBeacon: it survives a hard-blocked event loop
-                    // (sync infinite loop), unlike the batched fetch which never flushes if blocked.
-                    try { navigator.sendBeacon('/dbg', text + '\n'); } catch (e) {}
-                    var last = lines[lines.length - 1];
-                    if (last && last.text === text) { last.n++; render(); return; } // dedupe consecutive
-                    lines.push({ text: text, n: 1 });
-                    if (lines.length > 120) lines.shift();
-                    render();
-                }
-                ['log', 'warn', 'error'].forEach(function (k) {
-                    var o = console[k].bind(console);
-                    console[k] = function () { push(k.toUpperCase(), arguments); o.apply(console, arguments); };
-                });
-                window.addEventListener('error', function (e) { push('UNCAUGHT', [e.message + ' @ ' + e.filename + ':' + e.lineno]); });
-                window.addEventListener('unhandledrejection', function (e) { push('REJECT', [(e.reason && e.reason.stack) || e.reason]); flushPost(); });
-                push('DBG', ['==== SESSION ' + new Date().toISOString() + ' ====']);
-                flushPost();
-            })();
-        </script>
+        <!-- Client-side settings strip; filled in by ControlBar.init(). -->
+        <div id="controlbar"></div>
+
         <script type="module">
             import { Client } from './client/client.js';
 

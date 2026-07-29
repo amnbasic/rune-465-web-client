@@ -13,6 +13,7 @@ import PixLoader from '#/graphics/PixLoader.js';
 import SoftwarePix32 from '#/graphics/SoftwarePix32.js';
 import SoftwarePix8 from '#/graphics/SoftwarePix8.js';
 import Packet from '#/io/Packet.js';
+import WasdToggle from '#/client/WasdToggle.js';
 import JagString from '#/jstring/JagString.js';
 import type Js5 from '#/js5/Js5.js';
 import Js5Net from '#/js5/Js5Net.js';
@@ -189,7 +190,12 @@ export default class TitleScreen {
             TitleScreen.worldSwitchLoop(arg0);
             return;
         }
-        if (ClientMouseListener.mouseClickButton === 1 && ClientMouseListener.mouseClickX >= 715 && ClientMouseListener.mouseClickY >= 453) {
+        // WASD toggle sits directly above the mute button. Checked first and as an else-chain so
+        // the few rows where its box overlaps the mute button's open region (x>=715, y>=453)
+        // belong to the toggle only - the music button's own clicks are untouched.
+        if (ClientMouseListener.mouseClickButton === 1 && WasdToggle.hit(ClientMouseListener.mouseClickX, ClientMouseListener.mouseClickY)) {
+            Client.setWasdMode(!Client.wasdMode);
+        } else if (ClientMouseListener.mouseClickButton === 1 && ClientMouseListener.mouseClickX >= 715 && ClientMouseListener.mouseClickY >= 453) {
             TitleScreen.mute = !TitleScreen.mute;
             if (TitleScreen.mute) {
                 MidiManager.stop();
@@ -380,6 +386,7 @@ export default class TitleScreen {
             TitleScreen.drawFlames();
         }
         TitleScreen.titleMute![TitleScreen.mute ? 1 : 0].plotSprite(725, 463);
+        WasdToggle.draw(Client.wasdMode);
         if (Client.state > 5 && Client.plug !== 2) {
             if (TitleScreen.slButton === null) {
                 TitleScreen.slButton = PixLoader.makePix8(TitleScreen.slButtonId, Client.sprites!);
