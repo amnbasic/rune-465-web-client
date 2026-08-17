@@ -11,17 +11,34 @@ let resolveIdle: (() => void) | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 const sock = net.connect(PORT, HOST);
 sock.setNoDelay(true);
-const killer = setTimeout(() => { console.log('[verify] TIMEOUT'); process.exit(2); }, 15000);
-sock.on('error', e => { console.log('[verify] err', (e as Error).message); process.exit(3); });
+const killer = setTimeout(() => {
+    console.log('[verify] TIMEOUT');
+    process.exit(2);
+}, 15000);
+sock.on('error', e => {
+    console.log('[verify] err', (e as Error).message);
+    process.exit(3);
+});
 sock.on('data', d => {
     buf = Buffer.concat([buf, d]);
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { const r = resolveIdle; resolveIdle = null; if (r) r(); }, 250);
+    idleTimer = setTimeout(() => {
+        const r = resolveIdle;
+        resolveIdle = null;
+        if (r) r();
+    }, 250);
 });
-function waitIdle(): Promise<void> { return new Promise(res => { resolveIdle = res; }); }
+function waitIdle(): Promise<void> {
+    return new Promise(res => {
+        resolveIdle = res;
+    });
+}
 function deblock(w: Buffer): Buffer {
     const o: number[] = [];
-    for (let i = 0; i < w.length; i++) { if (i > 0 && i % 512 === 0) continue; o.push(w[i]); }
+    for (let i = 0; i < w.length; i++) {
+        if (i > 0 && i % 512 === 0) continue;
+        o.push(w[i]);
+    }
     return Buffer.from(o);
 }
 async function fetchContainer(c: number, f: number): Promise<Buffer> {
@@ -50,27 +67,51 @@ function nameHash(s: string): number {
     return h;
 }
 sock.on('connect', async () => {
-    const hs = Buffer.alloc(5); hs[0] = 15; hs.writeInt32BE(464, 1); sock.write(hs);
+    const hs = Buffer.alloc(5);
+    hs[0] = 15;
+    hs.writeInt32BE(464, 1);
+    sock.write(hs);
     await waitIdle();
-    if (buf[0] !== 0) { console.log('handshake rejected'); process.exit(1); }
+    if (buf[0] !== 0) {
+        console.log('handshake rejected');
+        process.exit(1);
+    }
     buf = buf.subarray(1);
     // ref table idx 8: parse groups + name hashes
     const d = decompress(await fetchContainer(255, 8));
     let pos = 0;
     const g1 = () => d[pos++] & 0xff;
     const g2 = () => ((d[pos++] & 0xff) << 8) | (d[pos++] & 0xff);
-    const g4 = () => { const v = d.readInt32BE(pos); pos += 4; return v; };
-    const proto = g1(); if (proto >= 6) g4();
-    const flags = g1(); const size = g2();
-    const ids: number[] = []; let a = 0;
-    for (let i = 0; i < size; i++) { a += g2(); ids.push(a); }
+    const g4 = () => {
+        const v = d.readInt32BE(pos);
+        pos += 4;
+        return v;
+    };
+    const proto = g1();
+    if (proto >= 6) g4();
+    const flags = g1();
+    const size = g2();
+    const ids: number[] = [];
+    let a = 0;
+    for (let i = 0; i < size; i++) {
+        a += g2();
+        ids.push(a);
+    }
     const hashes: number[] = new Array(size).fill(0);
     if (flags & 1) for (let i = 0; i < size; i++) hashes[i] = g4();
     const want = nameHash('mapback');
     let gidx = -1;
-    for (let i = 0; i < size; i++) if (hashes[i] === want) { gidx = i; break; }
+    for (let i = 0; i < size; i++)
+        if (hashes[i] === want) {
+            gidx = i;
+            break;
+        }
     console.log(`[verify] nameHash('mapback')=${want} -> group ${gidx >= 0 ? ids[gidx] : 'NOT FOUND'} (of ${size} groups)`);
-    if (gidx < 0) { clearTimeout(killer); sock.end(); process.exit(0); }
+    if (gidx < 0) {
+        clearTimeout(killer);
+        sock.end();
+        process.exit(0);
+    }
     const gid = ids[gidx];
     // fetch the sprite group + decode the standard sprite header (trailer format)
     const s = decompress(await fetchContainer(8, gid));
@@ -91,5 +132,7 @@ sock.on('connect', async () => {
         console.log(`  sprite ${i}: xof=${xof} yof=${yof} trimmed=${wi}x${hi}`);
         q += 2;
     }
-    clearTimeout(killer); sock.end(); process.exit(0);
+    clearTimeout(killer);
+    sock.end();
+    process.exit(0);
 });

@@ -62,7 +62,12 @@ export default class World {
     static maxTileX: number = 0;
     static maxTileZ: number = 0;
     static occlusionCycle: Int32Array[][] | null = null;
+    // Tile draw distance (25 = cache baseline). The visibility maps are sized for
+    // maxVisibilityRadius so the radius itself can change at runtime without reallocating.
     static visibilityRadius: number = 0;
+    static maxVisibilityRadius: number = 45;
+    // Far-clip depth (cache baseline 3500 = 25 tiles * 140); scaled with the draw distance.
+    static farClip: number = 3500;
     static visibilityMap: boolean[][] | null = null;
     static visibilityMapBuffer: boolean[][] | null = null;
     static squares: (Square | null)[][][] | null = null;
@@ -110,8 +115,14 @@ export default class World {
         World.occlusionCycle = Array.from({ length: 4 }, () => Array.from({ length: 105 }, () => new Int32Array(105)));
         World.resetMap();
         World.visibilityRadius = 25;
-        World.visibilityMap = Array.from({ length: World.visibilityRadius + World.visibilityRadius + 1 }, () => new Array(World.visibilityRadius + World.visibilityRadius + 1).fill(false));
-        World.visibilityMapBuffer = Array.from({ length: World.visibilityRadius + World.visibilityRadius + 2 }, () => new Array(World.visibilityRadius + World.visibilityRadius + 2).fill(false));
+        World.visibilityMap = Array.from({ length: World.maxVisibilityRadius + World.maxVisibilityRadius + 1 }, () => new Array(World.maxVisibilityRadius + World.maxVisibilityRadius + 1).fill(false));
+        World.visibilityMapBuffer = Array.from({ length: World.maxVisibilityRadius + World.maxVisibilityRadius + 2 }, () => new Array(World.maxVisibilityRadius + World.maxVisibilityRadius + 2).fill(false));
+    }
+
+    /** Draw-distance knob (settings panel). Clamped to the preallocated visibility maps. */
+    static setVisibilityRadius(radius: number): void {
+        World.visibilityRadius = Math.min(World.maxVisibilityRadius, Math.max(1, radius | 0));
+        World.farClip = World.visibilityRadius * 140;
     }
 
     static method131(): void {
@@ -721,18 +732,18 @@ export default class World {
         if (var6 < 1) {
             var6 = 1;
         }
-        const var8: number = ((var4 << 9) / var6) | 0;
-        const var9: number = ((var7 << 9) / var6) | 0;
+        const var8: number = ((var4 * Pix3D.focal) / var6) | 0;
+        const var9: number = ((var7 * Pix3D.focal) / var6) | 0;
         let var10: number = (arg2 * World.cameraSinX + var5 * World.cameraCosX) >> 16;
         const var11: number = (arg2 * World.cameraCosX - var5 * World.cameraSinX) >> 16;
         if (var10 < 1) {
             var10 = 1;
         }
-        const var12: number = ((var4 << 9) / var10) | 0;
-        const var13: number = ((var11 << 9) / var10) | 0;
+        const var12: number = ((var4 * Pix3D.focal) / var10) | 0;
+        const var13: number = ((var11 * Pix3D.focal) / var10) | 0;
         if (var6 < 50 && var10 < 50) {
             return false;
-        } else if (var6 > 3500 && var10 > 3500) {
+        } else if (var6 > World.farClip && var10 > World.farClip) {
             return false;
         } else if (var8 < Pix3D.minX && var12 < Pix3D.minX) {
             return false;
@@ -1700,14 +1711,14 @@ export default class World {
         if (var43 < 50) {
             return;
         }
-        const var44: number = Pix3D.originX + (((var21 << 9) / var25) | 0);
-        const var45: number = Pix3D.originY + (((var24 << 9) / var25) | 0);
-        const var46: number = Pix3D.originX + (((var27 << 9) / var31) | 0);
-        const var47: number = Pix3D.originY + (((var30 << 9) / var31) | 0);
-        const var48: number = Pix3D.originX + (((var33 << 9) / var37) | 0);
-        const var49: number = Pix3D.originY + (((var36 << 9) / var37) | 0);
-        const var50: number = Pix3D.originX + (((var39 << 9) / var43) | 0);
-        const var51: number = Pix3D.originY + (((var42 << 9) / var43) | 0);
+        const var44: number = Pix3D.originX + (((var21 * Pix3D.focal) / var25) | 0);
+        const var45: number = Pix3D.originY + (((var24 * Pix3D.focal) / var25) | 0);
+        const var46: number = Pix3D.originX + (((var27 * Pix3D.focal) / var31) | 0);
+        const var47: number = Pix3D.originY + (((var30 * Pix3D.focal) / var31) | 0);
+        const var48: number = Pix3D.originX + (((var33 * Pix3D.focal) / var37) | 0);
+        const var49: number = Pix3D.originY + (((var36 * Pix3D.focal) / var37) | 0);
+        const var50: number = Pix3D.originX + (((var39 * Pix3D.focal) / var43) | 0);
+        const var51: number = Pix3D.originY + (((var42 * Pix3D.focal) / var43) | 0);
         Pix3D.trans = 0;
         if ((var48 - var50) * (var47 - var51) - (var49 - var51) * (var46 - var50) > 0) {
             if (World.click && World.insideTriangle(World.clickX + Pix3D.originX, World.clickY + Pix3D.originY, var49, var51, var47, var48, var50, var46)) {
@@ -1777,8 +1788,8 @@ export default class World {
                 Ground.drawTextureVertexY[var9] = var16;
                 Ground.drawTextureVertexZ[var9] = var17;
             }
-            Ground.drawVertexX[var9] = Pix3D.originX + (((var13 << 9) / var17) | 0);
-            Ground.drawVertexY[var9] = Pix3D.originY + (((var16 << 9) / var17) | 0);
+            Ground.drawVertexX[var9] = Pix3D.originX + (((var13 * Pix3D.focal) / var17) | 0);
+            Ground.drawVertexY[var9] = Pix3D.originY + (((var16 * Pix3D.focal) / var17) | 0);
         }
         Pix3D.trans = 0;
         const var18: number = arg0.faceVertexA.length;

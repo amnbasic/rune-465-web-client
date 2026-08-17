@@ -1,14 +1,49 @@
 <!doctype html>
 <html>
     <head>
-        <title>Client-TS</title>
+        <title>RuneJS</title>
 
         <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=0.7" />
+        <!-- initial-scale MUST be 1 here, and there used to be an `initial-scale=0.7` on this line.
+             It contradicts `width=device-width`: one says 1 CSS px = 1 pt, the other says 0.7. What
+             WebKit does with that is expand the layout viewport by 1/0.7, so the whole page rendered
+             ~43% zoomed out - which is why every DOM button in the client measured about 22pt
+             instead of 32. `maximum-scale` went with it; it only ever conflicted with the same
+             thing.
+
+             user-scalable=no is kept, but it is not the defence: Safari has ignored it in tabs
+             since iOS 10. What actually stops the browser pinch-zooming the page instead of the
+             camera is touch-action (below) plus the client's own gesture handling in MobileTouch.
+
+             viewport-fit=cover is load-bearing and not cosmetic - without it every
+             env(safe-area-inset-*) below resolves to 0px. -->
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
+
+        <!-- iPhone Safari does not expose the Fullscreen API, so Add to Home Screen is the route to
+             a chromeless landscape game there. `apple-mobile-web-app-capable` and the manifest's
+             `display` member both do that job on current iOS; both are present so neither version
+             of the rule leaves us without one. `black-translucent` is what removes the status bar
+             backdrop - it is documented as going away eventually, which is the other reason the
+             manifest is here rather than being called a no-op. -->
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="RuneJS" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="theme-color" content="#000000" />
+        <link rel="manifest" href="app.webmanifest" />
+        <!-- Without an apple-touch-icon iOS puts a SCREENSHOT of the page on the home screen. -->
+        <link rel="apple-touch-icon" href="icon-180.png" />
+        <link rel="icon" href="icon-192.png" />
 
         <style>
             html {
-                touch-action: manipulation;
+                /* `manipulation` was here and it still PERMITS pinch-zoom - it only suppresses the
+                   double-tap delay. `pan-y` is the value that actually takes the pinch away from
+                   the browser, while leaving the settings panel scrollable. The canvas narrows
+                   this further to `none` from MobileTouch, so the client owns every gesture over
+                   the game itself. */
+                touch-action: pan-y;
+                -webkit-text-size-adjust: 100%;
             }
 
             body,
@@ -21,16 +56,265 @@
 
             body {
                 margin: 0px 0px;
+                /* room for the settings button that hangs below the frame */
+                padding-bottom: 44px;
                 overflow: auto;
                 background-color: black;
             }
 
-            #game {
-                padding-left: 0;
-                padding-right: 0;
-                margin-left: auto;
-                margin-right: auto;
+            /* --- Touch layout -------------------------------------------------------
+               Two things go wrong on a phone with the desktop layout.
+
+               1. viewport-fit=cover plus a translucent status bar means the page starts
+                  UNDER the clock and notch, so the game viewport had the time sitting on
+                  top of it. The safe-area inset pushes the frame clear.
+               2. <center> top-aligns the frame, so in portrait the game sat in the top
+                  third with a wall of black beneath it. Centring makes the leftover space
+                  symmetric, which reads as deliberate letterboxing rather than a bug.
+
+               This cannot make a 765x503 frame FILL a portrait phone — see the note in
+               ScreenMode. It just stops the wasted space looking like breakage. */
+            @media (pointer: coarse) {
+                body {
+                    padding-top: env(safe-area-inset-top, 0px);
+                    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 44px);
+                    /* Landscape is the only way this client is playable, and in landscape a
+                       notched iPhone's insets are on the SIDES (44-62pt on the notch side), not
+                       top and bottom. Only top/bottom were set here, so the frame ran under the
+                       Dynamic Island. */
+                    padding-left: env(safe-area-inset-left, 0px);
+                    padding-right: env(safe-area-inset-right, 0px);
+                    min-height: 100svh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    overflow: hidden;
+                }
+                /* <center> is a block that would otherwise stretch and defeat the centring. */
+                body > center {
+                    width: 100%;
+                }
+            }
+
+            /* --- Resizable layout ---------------------------------------------------
+               ScreenMode publishes which presentation is live as data-layout on <body>
+               (see ScreenMode.applySmoothing). In `fill` the canvas IS the window: none
+               of the centring, gutters or reserved strips above apply, and the DOM
+               chrome has to stop sitting under the frame - there is no "under" left -
+               and become an overlay inside the safe area instead. */
+            body[data-layout='fill'] {
+                padding: 0;
                 display: block;
+                overflow: hidden;
+            }
+
+            /* --- The mobile chrome ---------------------------------------------------
+               ONE column of equal icon buttons down the LEFT EDGE, gear at the bottom:
+
+                   [ chat ]     #mobile-bar, growing upward
+                   [ gear ]     #controlbar
+                   ~ ~ ~ ~      the multiway icon, frame (15,15) from this corner
+
+               They were split into two far-apart corners before, and both of those
+               corners have since been taken. Chat moved to the TOP LEFT, so the gear
+               parked there ended up drawn on top of the chatbox; and #mobile-bar was
+               pinned 146px off the BOTTOM to sit above a chat cluster that is no longer
+               at the bottom, which left it floating in the middle of the world. The left
+               edge between the two is the only strip of frame nothing claims, and a
+               single column of matching icons is what the reference HUD puts there.
+
+               The two elements are positioned INDEPENDENTLY rather than nested, because
+               #controlbar lives inside #game (its settings panel anchors off the frame)
+               and #mobile-bar is appended after it. The gear takes the bottom slot so
+               neither has to know how many buttons the other has: #mobile-bar starts one
+               slot up and grows away from it. --hud-stack-step is that slot, i.e. the
+               button height plus the gap.
+
+               There is no Keyboard button at all: tapping a text field raises it. */
+            body[data-layout='fill'] {
+                /* --hud-safe-* is published by HudSkin.publishCss and is env() AFTER the Edge
+                   margin dial has been applied to it. The env() fallbacks are what these resolve
+                   to before any script has run, and on any build where the dial is Full they are
+                   the same number. Reading env() directly here was the bug: the drawn HUD scales
+                   the side insets and the stylesheet did not, so the two clusters that are
+                   supposed to sit beside each other drifted apart. */
+                --hud-stack-x: calc(var(--hud-safe-left, env(safe-area-inset-left, 0px)) + 8px);
+                /* 52px clears the multiway-combat indicator in the corner below. */
+                --hud-stack-y: calc(var(--hud-safe-bottom, env(safe-area-inset-bottom, 0px)) + 52px);
+                --hud-stack-step: calc(var(--hud-cell-size, 44px) + 8px);
+            }
+
+            body[data-layout='fill'] #mobile-bar {
+                position: fixed;
+                z-index: 20;
+                top: auto;
+                right: auto;
+                left: var(--hud-stack-x);
+                bottom: calc(var(--hud-stack-y) + var(--hud-stack-step));
+                /* column-REVERSE: the first child is the chat toggle, and it belongs at the
+                   bottom of the stack next to the gear — nearest the thumb, and in the order the
+                   buttons were added. */
+                flex-direction: column-reverse;
+                padding: 0;
+            }
+
+            body[data-layout='fill'] #controlbar {
+                position: fixed;
+                right: auto;
+                top: auto;
+                margin-top: 0;
+                left: var(--hud-stack-x);
+                bottom: var(--hud-stack-y);
+            }
+
+            /* One shape for every button in the stack, wherever it comes from. 44px is the touch
+               guideline and roughly a fingertip; the glyph inside stays small, so the target grows
+               without the chrome becoming a slab over the world.
+
+               EVERY COLOUR HERE IS A --hud-* CUSTOM PROPERTY, published by HudSkin.publishCss from
+               the same numbers the canvas paints its stones with, and re-published whenever the
+               HUD alpha setting changes. That is not tidiness: this rule used to hold its own
+               rgba() copy of a fill the drawn HUD had already moved off, and a *duplicate* copy of
+               this selector further down the file silently won on source order and kept the gear
+               on a rim the canvas had dropped. The fallbacks are what the tokens resolve to at the
+               default alpha, so the buttons are still right on the first frame before any script
+               has run. */
+            body[data-layout='fill'] #mobile-bar button,
+            body[data-layout='fill'] #controlbar .cb-open {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-sizing: border-box;
+                /* THE SAME CELL THE CANVAS DRAWS. `HudSkin.publishCss` writes --hud-cell-size from
+                   HudStrip's computed cell, converted back into CSS pixels, so these buttons, the
+                   hotkey column beside them and the tab strip across the screen are one size. They
+                   were three: 44 here, 44 there and whatever fit on the right, which on a phone is
+                   three visibly different grids. The 44px fallback is the desktop answer and what
+                   they measure before any script has run. */
+                width: var(--hud-cell-size, 44px);
+                height: var(--hud-cell-size, 44px);
+                min-width: 0;
+                min-height: 0;
+                padding: 0;
+                font-size: 17px;
+                line-height: 1;
+                color: var(--hud-text, #e6dcc6);
+                background: var(--hud-cell, rgba(74, 65, 54, 0.77));
+                border: 1px solid var(--hud-edge, rgba(86, 76, 60, 0.85));
+                border-radius: var(--hud-radius, 8px);
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+                cursor: pointer;
+            }
+
+            /* The baked pixel glyphs. `pixelated` is required: these are 24px of hand-placed
+               pixels, and a browser's default smooth scaling turns a 1px outline into a grey
+               smudge on any display that is not exactly 1:1. */
+            #mobile-bar button img,
+            #controlbar .cb-open img {
+                image-rendering: pixelated;
+                display: block;
+            }
+
+            /* A toggle whose panel is currently up — the same red the game draws behind the open
+               side tab. The button says what is ON SCREEN, since an icon cannot say what the tap
+               will do the way "Hide chat" did. */
+            body[data-layout='fill'] #mobile-bar button.hud-on {
+                color: var(--hud-text-lit, #ffe6a8);
+                background: var(--hud-active, rgba(122, 47, 42, 0.88));
+            }
+
+            body[data-layout='fill'] #mobile-bar button:active,
+            body[data-layout='fill'] #controlbar .cb-open:hover,
+            body[data-layout='fill'] #controlbar .cb-open-active {
+                color: var(--hud-text-lit, #ffe6a8);
+            }
+
+            /* Fitted/windowed: the bar is a row in the strip under the frame rather than an
+               overlay, so it keeps a plain panel button — flat, and no rounder than the settings
+               drop-down it sits beside. */
+            /* Windowed, the bar is a strip below the frame and wants a little air around it. In
+               the fill layout it is a column flush with the gear and the rule above zeroes this —
+               which only works because it is here rather than inline on the element. */
+            #mobile-bar {
+                padding: 6px;
+            }
+
+            #mobile-bar button {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 6px 12px;
+                font:
+                    12px/1.4 Arial,
+                    Helvetica,
+                    sans-serif;
+                color: #cbbfa6;
+                background: linear-gradient(#2a2521, #1e1a16);
+                border: 1px solid #3d352c;
+                border-radius: 4px;
+                cursor: pointer;
+            }
+
+            #mobile-bar button.hud-on {
+                color: #f0d9a0;
+                border-color: #6b5c46;
+            }
+
+            @media (pointer: coarse) {
+                body:not([data-layout='fill']) #mobile-bar button {
+                    min-height: 38px;
+                }
+            }
+
+            /* Fixed and centred on the WINDOW rather than hung off the button: anchored
+               to a corner, a 420px panel runs off the edge on any phone held upright.
+               It opens DOWNWARD from the gear, so `top` rather than `bottom`. */
+            body[data-layout='fill'] #controlbar .cb-panel {
+                position: fixed;
+                right: auto;
+                bottom: auto;
+                left: 50%;
+                transform: translateX(-50%);
+                /* Below the gear, which is 44px tall at a 44px offset. */
+                top: calc(env(safe-area-inset-top, 0px) + 94px);
+                width: min(420px, calc(100vw - 12px));
+                max-height: 74vh;
+                overflow-y: auto;
+            }
+
+            /* --- Downscale smoothing -------------------------------------------------
+               `image-rendering: pixelated` is nearest-neighbour. That is right when the
+               frame is blown UP - it keeps the 2006 art crisp - and destructive when it
+               is shrunk, because nearest-neighbour does not average, it deletes rows. A
+               phone presenting a 765-wide frame does exactly that. ScreenMode sets
+               data-smooth whenever the live presentation is a downscale. */
+            body[data-smooth='on'] canvas {
+                image-rendering: auto;
+            }
+
+            /* Anchor for the settings overlay. */
+            #game {
+                position: relative;
+                display: inline-block;
+                line-height: 0;
+            }
+
+            /* The GPU scene sits directly under the 2D frame, same origin and same CSS size
+               (ScreenMode keeps them in step so the zoom modes scale both together).
+               pointer-events:none is REQUIRED: an absolutely-positioned element paints above a
+               static one, so without it this layer sits on top of #canvas and eats every click. */
+            #glcanvas {
+                position: absolute;
+                left: 0;
+                top: 0;
+                z-index: 0;
+                pointer-events: none;
+            }
+
+            /* Stack the 2D frame above the GPU layer and keep it the click target. */
+            #canvas {
+                position: relative;
+                z-index: 1;
             }
 
             canvas {
@@ -44,7 +328,6 @@
                 user-select: none;
                 outline: none;
                 -webkit-tap-highlight-color: rgba(255, 255, 255, 0);
-                z-index: -1;
                 image-rendering: pixelated;
             }
 
@@ -52,22 +335,137 @@
                 background-color: black !important;
             }
 
-            /* Controls panel under the canvas (populated by src/client/ControlBar.ts).
-               Styled to sit with the client rather than beside it: same 765px width, RS-ish
-               stone/parchment palette, and everything wraps so it can never overflow. */
+            /* Settings overlay (populated by src/client/ControlBar.ts). It lives INSIDE #game so
+               it can anchor off the frame, hanging off the bottom-right corner exactly where the
+               old control strip sat. ScreenMode.BUTTON_STRIP reserves the room for it when it
+               fits the frame to the window, so it is always on screen and never needs repinning. */
             #controlbar {
-                width: 765px;
-                box-sizing: border-box;
-                margin: 6px auto 16px auto;
-                padding: 8px 12px 10px 12px;
-                text-align: left;
-                font: 11px/1.6 Arial, Helvetica, sans-serif;
+                position: absolute;
+                right: 0;
+                top: 100%;
+                margin-top: 6px;
+                z-index: 10;
+                text-align: right;
+                font:
+                    11px/1.6 Arial,
+                    Helvetica,
+                    sans-serif;
                 color: #b9ac93;
+                user-select: none;
+            }
+
+            /* The one button that replaces the old strip */
+            #controlbar .cb-open {
+                padding: 4px 12px;
+                font:
+                    11px/1.4 Arial,
+                    Helvetica,
+                    sans-serif;
+                color: #cbbfa6;
+                background: linear-gradient(#2a2521, #1e1a16);
+                border: 1px solid #3d352c;
+                border-radius: 3px;
+                cursor: pointer;
+            }
+
+            /* Over the frame the gear is one cell of the left-edge stack and is styled with it,
+               up in the mobile-chrome block — the rule that used to be here duplicated that
+               selector further down the file and silently won on source order, so the gear kept
+               the old 2px bright rim after the stack had dropped it. The windowed button keeps
+               the flat panel styling above, where it sits on the page rather than on the game. */
+
+            #controlbar .cb-open:hover,
+            #controlbar .cb-open-active {
+                color: #ffe6a8;
+                border-color: #6b5c46;
+            }
+
+            /* Drop-down panel: RS-ish stone/parchment palette, fixed width so it can never grow
+               past the frame, and everything inside wraps. */
+            #controlbar .cb-panel {
+                position: absolute;
+                right: 0;
+                /* Windowed the button hangs below the frame, so the panel opens UPWARD over the
+                   bottom-right of the canvas - that way it is on screen whatever the window
+                   height. The overlay position pins the button to the top corner, so it opens
+                   downward there instead. */
+                bottom: 100%;
+                margin-bottom: 4px;
+                width: 420px;
+                /* Never wider than the window: on a phone in the fitted layout this hangs off a
+                   bar under the frame, and 420px is wider than a portrait viewport. */
+                max-width: calc(100vw - 12px);
+                box-sizing: border-box;
+                padding: 0 12px 10px 12px;
+                text-align: left;
                 background: linear-gradient(#2a2521, #1e1a16);
                 border: 1px solid #3b332a;
                 border-radius: 4px;
-                box-shadow: inset 0 1px 0 #40382e;
-                user-select: none;
+                box-shadow:
+                    inset 0 1px 0 #40382e,
+                    0 4px 12px rgba(0, 0, 0, 0.6);
+            }
+
+            /* ON TOUCH THE PANEL IS PINNED TO THE WINDOW, IN BOTH LAYOUTS — and this is a
+               reachability fix, not a cosmetic one.
+
+               The rule above opens the panel UPWARD from a button that, in the fitted layout, sits
+               BELOW the frame. On a phone that button is near the bottom of the screen and the
+               panel is taller than the space above it, so its top rows — Layout among them — went
+               off the top of the window. And the touch rules give <body> `overflow: hidden`, so
+               there was nothing to scroll: switching to Fixed on a phone made the setting that
+               switches back unreachable. A one-way door in a settings panel.
+
+               Fixed to the viewport, capped to it, and scrollable inside itself, the panel cannot
+               leave the screen whatever the layout does or where the button is. `fill` mode keeps
+               its own top offset (it opens under a gear pinned to the top-left) via the more
+               specific rule earlier in this file; everything else here applies to both. */
+            @media (pointer: coarse) {
+                #controlbar .cb-panel {
+                    position: fixed;
+                    left: 50%;
+                    right: auto;
+                    bottom: auto;
+                    top: calc(env(safe-area-inset-top, 0px) + 8px);
+                    transform: translateX(-50%);
+                    margin-bottom: 0;
+                    width: min(420px, calc(100vw - 12px));
+                    max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 16px);
+                    overflow-y: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+            }
+
+            #controlbar .cb-tabs {
+                display: flex;
+                gap: 4px;
+                margin: 0 -12px 8px -12px;
+                padding: 6px 8px 0 8px;
+                border-bottom: 1px solid #3b332a;
+            }
+
+            #controlbar .cb-tab {
+                padding: 4px 12px;
+                font:
+                    11px/1.4 Arial,
+                    Helvetica,
+                    sans-serif;
+                color: #8a7d68;
+                background: transparent;
+                border: 1px solid transparent;
+                border-bottom: none;
+                border-radius: 3px 3px 0 0;
+                cursor: pointer;
+            }
+
+            #controlbar .cb-tab:hover {
+                color: #ffe6a8;
+            }
+
+            #controlbar .cb-tab-active {
+                color: #f0d9a0;
+                background: #241f1a;
+                border-color: #3d352c;
             }
 
             /* One titled row per control group */
@@ -83,7 +481,7 @@
             }
 
             #controlbar .cb-title {
-                flex: 0 0 78px;
+                flex: 0 0 88px;
                 color: #8a7d68;
                 font-size: 10px;
                 letter-spacing: 0.09em;
@@ -126,7 +524,9 @@
             #controlbar .cb-cap {
                 min-width: 15px;
                 padding: 1px 0;
-                font: 10px/1 "Courier New", monospace;
+                font:
+                    10px/1 'Courier New',
+                    monospace;
                 text-align: center;
                 color: #f0d9a0;
                 background: #17130f;
@@ -153,7 +553,10 @@
             /* ON / OFF pill */
             #controlbar .cb-toggle {
                 padding: 2px 9px;
-                font: bold 10px/1 Arial, Helvetica, sans-serif;
+                font:
+                    bold 10px/1 Arial,
+                    Helvetica,
+                    sans-serif;
                 letter-spacing: 0.06em;
                 border-radius: 9px;
                 border: 1px solid;
@@ -192,6 +595,28 @@
                 border-color: #6b5c46;
             }
 
+            /* One option of a 'choice' control; the selected one is lit. */
+            #controlbar .cb-choice {
+                padding: 2px 8px;
+                font: inherit;
+                color: #9a9086;
+                background: #241f1a;
+                border: 1px solid #3d352c;
+                border-radius: 3px;
+                cursor: pointer;
+            }
+
+            #controlbar .cb-choice:hover {
+                color: #ffe6a8;
+                border-color: #6b5c46;
+            }
+
+            #controlbar .cb-choice-active {
+                color: #1a1510;
+                background: #d8bf82;
+                border-color: #ffcc4d;
+            }
+
             /* Dimmed explanatory text rendered after a control (Control.hint) */
             #controlbar .cb-hint {
                 color: #7b7264;
@@ -203,12 +628,16 @@
     <body>
         <center>
             <div id="game">
+                <!-- GPU scene layer; the 2D canvas above keeps a transparent hole over the
+                     viewport so this shows through. Software renderer leaves it blank. -->
+                <canvas id="glcanvas"></canvas>
                 <canvas id="canvas"> Your browser is not capable of running our web client. </canvas>
+
+                <!-- Client-side settings; filled in by ControlBar.init(). Inside #game so it can
+                     anchor off the frame. -->
+                <div id="controlbar"></div>
             </div>
         </center>
-
-        <!-- Client-side settings strip; filled in by ControlBar.init(). -->
-        <div id="controlbar"></div>
 
         <script type="module">
             import { Client } from './client/client.js';

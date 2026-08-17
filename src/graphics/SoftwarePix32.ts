@@ -1,5 +1,6 @@
 import Pix32 from '#/graphics/Pix32.js';
 import Pix2D from '#/graphics/Pix2D.js';
+import PixMap from '#/graphics/PixMap.js';
 
 export default class SoftwarePix32 extends Pix32 {
     declare data: Int32Array;
@@ -69,6 +70,40 @@ export default class SoftwarePix32 extends Pix32 {
                 } else {
                     const var18 = arg0[arg4];
                     arg0[arg4++] = ((((var17 & 0xff00ff) * arg11 + (var18 & 0xff00ff) * var12) & 0xff00ff00) + (((var17 & 0xff00) * arg11 + (var18 & 0xff00) * var12) & 0xff0000)) >> 8;
+                }
+                arg2 += arg8;
+            }
+            arg3 += arg9;
+            arg2 = var13;
+            arg4 += arg5;
+        }
+    }
+
+    /**
+     * `tranScale`'s sibling that does not blend: it writes the source pixel with an ALPHA TAG in
+     * the top byte, which `PixMap` turns into real canvas alpha at present time.
+     *
+     * Why it has to exist. Blending is compositing against whatever is already in the frame, and
+     * with the GPU renderer the scene is NOT in the frame — it is on a canvas underneath, showing
+     * through a hole whose pixels read as black (PixMap.GL_TRANSPARENT). So a blended HUD panel
+     * composites against black and comes out dark and opaque, which is exactly what a see-through
+     * HUD must not do. Writing unblended colour plus an alpha instead hands the compositing to the
+     * browser, which does have both layers — so the panel ends up over the REAL scene.
+     *
+     * Same loop, same clipping and the same colour-key (source 0 = transparent) as `tranScale`;
+     * only the write differs.
+     */
+    static alphaScale(arg0: Int32Array, arg1: Int32Array, arg2: number, arg3: number, arg4: number, arg5: number, arg6: number, arg7: number, arg8: number, arg9: number, arg10: number, arg11: number): void {
+        const tag = PixMap.alphaTag(arg11) << 24;
+        const var13 = arg2;
+        for (let var14 = -arg7; var14 < 0; var14++) {
+            const var15 = (arg3 >> 16) * arg10;
+            for (let var16 = -arg6; var16 < 0; var16++) {
+                const var17 = arg1[(arg2 >> 16) + var15];
+                if (var17 === 0) {
+                    arg4++;
+                } else {
+                    arg0[arg4++] = (var17 & 0xffffff) | tag;
                 }
                 arg2 += arg8;
             }
@@ -1173,7 +1208,7 @@ export default class SoftwarePix32 extends Pix32 {
         this.yof -= var4;
     }
 
-    override transScalePlotSprite(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number): void {
+    override transScalePlotSprite(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number, arg5?: boolean): void {
         if (arg2 <= 0 || arg3 <= 0) {
             return;
         }
@@ -1236,7 +1271,11 @@ export default class SoftwarePix32 extends Pix32 {
             var8 += Math.imul(var12, var20);
             var17 += var20;
         }
-        SoftwarePix32.tranScale(Pix2D.pixels, this.data, var8, var9, var16, var17, arg2, arg3, var12, var13, var6, arg4);
+        if (arg5) {
+            SoftwarePix32.alphaScale(Pix2D.pixels, this.data, var8, var9, var16, var17, arg2, arg3, var12, var13, var6, arg4);
+        } else {
+            SoftwarePix32.tranScale(Pix2D.pixels, this.data, var8, var9, var16, var17, arg2, arg3, var12, var13, var6, arg4);
+        }
     }
 
     trim(): void {

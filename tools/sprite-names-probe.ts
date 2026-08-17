@@ -26,16 +26,56 @@ function deblock(wire: Buffer): Buffer {
 
 // LC500 step-80 names + likely 465 variants to test.
 const CANDIDATES = [
-    'compass', 'mapscene', 'mapfunction', 'mapfunctions', 'hitmarks', 'hitmark',
-    'headicons_pk', 'headicons_prayer', 'headicons_hint', 'hint_headicons',
-    'hint_mapmarkers', 'mapmarker', 'mapmarkers', 'hint_mapedge', 'mapedge',
-    'mapflag', 'mapdots', 'mapdot', 'cross', 'scrollbar', 'mod_icons',
-    'm39_60','l39_60','m40_60','l40_60','m39_59','m39_61','m40_59','m40_61','m39_60',
+    'compass',
+    'mapscene',
+    'mapfunction',
+    'mapfunctions',
+    'hitmarks',
+    'hitmark',
+    'headicons_pk',
+    'headicons_prayer',
+    'headicons_hint',
+    'hint_headicons',
+    'hint_mapmarkers',
+    'mapmarker',
+    'mapmarkers',
+    'hint_mapedge',
+    'mapedge',
+    'mapflag',
+    'mapdots',
+    'mapdot',
+    'cross',
+    'scrollbar',
+    'mod_icons',
+    'm39_60',
+    'l39_60',
+    'm40_60',
+    'l40_60',
+    'm39_59',
+    'm39_61',
+    'm40_59',
+    'm40_61',
+    'm39_60',
     // mapflag hunt:
-    'flag', 'mapflag', 'mm_flag', 'hint_mapflag', 'waypoint', 'flags',
-    'mapwaypoint', 'destination', 'mapmarker0', 'mapmarkers', 'flag_marker',
+    'flag',
+    'mapflag',
+    'mm_flag',
+    'hint_mapflag',
+    'waypoint',
+    'flags',
+    'mapwaypoint',
+    'destination',
+    'mapmarker0',
+    'mapmarkers',
+    'flag_marker',
     // archive 10 (binary) probe:
-    'huffman', 'huffman_wordenc', 'wordenc', 'p11_full', 'p12_full', 'b12_full', 'q8_full',
+    'huffman',
+    'huffman_wordenc',
+    'wordenc',
+    'p11_full',
+    'p12_full',
+    'b12_full',
+    'q8_full'
 ];
 
 let buf = Buffer.alloc(0);
@@ -43,18 +83,35 @@ let resolveIdle: (() => void) | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 const sock = net.connect(PORT, HOST);
 sock.setNoDelay(true);
-setTimeout(() => { console.log('[probe] TIMEOUT'); process.exit(2); }, 8000);
+setTimeout(() => {
+    console.log('[probe] TIMEOUT');
+    process.exit(2);
+}, 8000);
 sock.on('data', d => {
     buf = Buffer.concat([buf, d]);
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { const r = resolveIdle; resolveIdle = null; if (r) r(); }, 350);
+    idleTimer = setTimeout(() => {
+        const r = resolveIdle;
+        resolveIdle = null;
+        if (r) r();
+    }, 350);
 });
-function waitIdle(): Promise<void> { return new Promise(res => { resolveIdle = res; }); }
+function waitIdle(): Promise<void> {
+    return new Promise(res => {
+        resolveIdle = res;
+    });
+}
 
 sock.on('connect', async () => {
-    const hs = Buffer.alloc(5); hs[0] = 15; hs.writeInt32BE(464, 1); sock.write(hs);
+    const hs = Buffer.alloc(5);
+    hs[0] = 15;
+    hs.writeInt32BE(464, 1);
+    sock.write(hs);
     await waitIdle();
-    if (buf[0] !== 0) { console.log('[probe] handshake failed', buf[0]); process.exit(1); }
+    if (buf[0] !== 0) {
+        console.log('[probe] handshake failed', buf[0]);
+        process.exit(1);
+    }
     buf = buf.subarray(1);
 
     // request ref-table 255:ARCHIVE
@@ -68,25 +125,39 @@ sock.on('connect', async () => {
     let ref: Buffer;
     if (compType === 0) ref = container.subarray(5, 5 + compLen);
     else if (compType === 2) ref = Buffer.from(gunzipSync(container.subarray(9, 9 + compLen)));
-    else { console.log('[probe] bzip2 not handled here; compType', compType); process.exit(1); }
+    else {
+        console.log('[probe] bzip2 not handled here; compType', compType);
+        process.exit(1);
+    }
 
     // parse ref-table header
     let o = 0;
     const protocol = ref[o++];
     if (protocol >= 6) o += 4; // revision
     const flags = ref[o++];
-    const groupCount = ref.readUInt16BE(o); o += 2;
-    const groupIds: number[] = []; let last = 0;
-    for (let i = 0; i < groupCount; i++) { last += ref.readUInt16BE(o); o += 2; groupIds.push(last); }
+    const groupCount = ref.readUInt16BE(o);
+    o += 2;
+    const groupIds: number[] = [];
+    let last = 0;
+    for (let i = 0; i < groupCount; i++) {
+        last += ref.readUInt16BE(o);
+        o += 2;
+        groupIds.push(last);
+    }
     const names: number[] = [];
-    if (flags & 1) { for (let i = 0; i < groupCount; i++) { names.push(ref.readInt32BE(o)); o += 4; } }
+    if (flags & 1) {
+        for (let i = 0; i < groupCount; i++) {
+            names.push(ref.readInt32BE(o));
+            o += 4;
+        }
+    }
 
     console.log(`[probe] archive ${ARCHIVE}: protocol=${protocol} flags=${flags} groups=${groupCount} hasNameHashes=${(flags & 1) === 1}`);
     const nameSet = new Set(names);
     console.log(`\n[probe] candidate name -> present? (hash)`);
     for (const c of CANDIDATES) {
         const h = nameHash(c);
-        console.log(`  ${(nameSet.has(h) ? 'YES' : 'no ')}  ${c.padEnd(18)} ${h}`);
+        console.log(`  ${nameSet.has(h) ? 'YES' : 'no '}  ${c.padEnd(18)} ${h}`);
     }
     sock.end();
     process.exit(0);

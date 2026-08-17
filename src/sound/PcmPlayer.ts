@@ -30,6 +30,9 @@ export default class PcmPlayer {
 
     // custom: increased samples for web throttling
     backgroundTargetSamplesQueued: number = 0;
+    // custom: true while the deep background buffer is in force, so cycle() can tear it
+    // back down on the first foreground tick instead of leaving it latched forever.
+    wasBackgrounded: boolean = false;
 
     static init(arg0: boolean): void {
         PcmPlayer.frequency = 22050;
@@ -82,6 +85,32 @@ export default class PcmPlayer {
             if (this.backgroundTargetSamplesQueued !== 0 && document.hidden) {
                 var4 = Math.max(var4, this.backgroundTargetSamplesQueued);
                 maxSamplesQueued = this.backgroundTargetSamplesQueued + 256;
+                this.wasBackgrounded = true;
+            } else if (this.wasBackgrounded) {
+                // Returning to the foreground: undo the deep background buffer.
+                //
+                // While hidden we deliberately queue backgroundTargetSamplesQueued samples
+                // (4s at 22050Hz) because browsers throttle timers in background tabs and a
+                // shallow buffer underruns. Nothing used to reverse that, and two values
+                // survived the transition:
+                //   - capacity, grown at the line below to fit the background target,
+                //   - additionalTargetSamplesQueued, which the adaptive block further down
+                //     ratchets up to the largest drain it has seen and never lowers.
+                // Both feed the target queue depth, so a single alt-tab left every later
+                // sound multiple seconds late for the rest of the session.
+                this.wasBackgrounded = false;
+                this.additionalTargetSamplesQueued = 0;
+                this.maxAccepted = 0;
+                this.previousMaxAccepted = 0;
+                var4 = this.initialTargetSampledQueued;
+                const foregroundCapacity = (this.initialTargetSampledQueued & 0xfffffc00) + 1024;
+                if (this.capacity > foregroundCapacity) {
+                    this.capacity = foregroundCapacity;
+                    this.close();
+                    this.open(this.capacity);
+                    this.skipAcceptedCheck = true;
+                    var3 = 0;
+                }
             }
             if (var4 + 256 > maxSamplesQueued) {
                 var4 = maxSamplesQueued - 256;
@@ -348,8 +377,21 @@ class WebPcmPlayer extends PcmPlayer {
                 audioData[frame] = (sample >> 8) / 32768;
             }
         }
-        if (this.nextBufferTime < window.audioContext.currentTime) {
-            this.nextBufferTime = window.audioContext.currentTime;
+        // The schedule cursor is corrected in BOTH directions. Falling behind currentTime is
+        // an underrun (start() in the past plays immediately), which upstream already handled.
+        // Running too far AHEAD is the latency bug: nextBufferTime only ever advances by each
+        // buffer's duration, so any lead it gains — from a stutter, or from the deep buffer a
+        // background tab queues — is inherited by every later sound and never repaid.
+        // Clamp the lead to the target queue depth so audio stays gapless but cannot drift.
+        const now = window.audioContext.currentTime;
+        if (this.nextBufferTime < now) {
+            this.nextBufferTime = now;
+        } else {
+            const targetSamples = this.initialTargetSampledQueued + this.additionalTargetSamplesQueued;
+            const maxLead = (targetSamples + 256) / PcmPlayer.frequency;
+            if (this.nextBufferTime - now > maxLead) {
+                this.nextBufferTime = now + maxLead;
+            }
         }
         const line = window.audioContext.createBufferSource();
         line.buffer = audioBuffer;

@@ -16,7 +16,11 @@ export default class Statics {
         // 212 MISSILE_SPAWN=23 (audit: server writes 23B — SHORT+4xINT+SHORT+SHORT+BYTE; the old 20
         // desynced 3 bytes per skillshot), 213 MISSILE_DETONATE=14, 215 REMOTE_FINE_POS=10, 216
         // DEBUG_OVERLAY=1. These are read + skipped (no handler -> sentinel); glide render is later.
-        0, 8, 0, 0, 0, 0, 0, 6, 7, 0, 10, 8, 23, 14, -2, 10, 1, 0, 17, 0, 0, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 3, 7, 14,
+        // opcode 206 = if_setgraphic, a custom server->client packet (body 6: [i32 BE componentHash]
+        // [u16 spriteId]). Standard 464 leaves 206 unused at size 0. It exists because the 464/465
+        // protocol has no way to repoint a component's sprite, and widget 90's autocast strip has no
+        // child carrying the Iban Blast icon (sprite 53) — slot 18 is hardcoded to Claws of Guthix (60).
+        0, 8, 0, 0, 0, 0, 6, 6, 7, 0, 10, 8, 23, 14, -2, 10, 1, 0, 17, 0, 0, -2, -2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 3, 7, 14,
         0, 0, 0, 0, 6, 3, 0, 0, 0, 0, 0, 0, -2, 0, 12, 0
     ];
 
@@ -43,6 +47,10 @@ export default class Statics {
         m[69] = 53; // if_runscript — 464 layout matches the rev-500 handler exactly
         m[254] = 4254; // access mask (IF_SETEVENTS) — enables component right-click options
         // zone protocol (ground items, dynamic locs, projectiles, tile spotanims)
+        m[5] = 4005; // play song (LE u16 song id) — Client.playSongs was ported but never reached
+        m[1] = 4001; // set component model rotation + zoom
+        m[201] = 4201; // move component child (x/y offsets)
+        m[83] = 4083; // server console message
         m[132] = 4132; // zone anchor — 464 sends Z FIRST, raw bytes
         m[159] = 4159; // clear zone
         m[112] = 4112; // ground item add
@@ -53,6 +61,7 @@ export default class Statics {
         m[218] = 4218; // projectile
         // component content setters (item/model displays, chatheads, colour, hide, player options)
         m[114] = 4114; // item/obj on component (interface item displays, e.g. equip-stats)
+        m[206] = 4206; // sprite on component (custom — see the 206 note on the size table above)
         m[207] = 4207; // npc head on component (dialogue chathead)
         m[8] = 4008; // player head on component (dialogue chathead)
         m[9] = 4009; // raw model on component
@@ -66,6 +75,38 @@ export default class Statics {
         m[113] = 192; // camera MOVE: [u8 lx][u8 lz][u16 BE height][u8 rate][u8 accel] — exact match
         m[82] = 223; // camera LOOK: same layout — exact match
         m[99] = 4099; // camera reset (no body)
+        // Camera SHAKE. The 464 protocol has no shake opcode of its own — docs/protocol/
+        // 464-authority.md lists only 99 CAM_RESET, 82 CAM_LOOKAT and 113 CAM_MOVETO — but the
+        // rev-500 handler at 221 is fully ported (Client.camShake* + the per-axis jitter in the
+        // draw loop) and was simply unreachable, because nothing mapped to it.
+        //
+        // 15 is an unused 464 opcode whose size-table entry is already 6, exactly the body the
+        // 221 handler reads: [u8 axis][u8 jitter][u8 amplitude][u8 frequency][u16 cycle].
+        // The server sends it from OutboundPacketHandler.shakeCamera(). Before this line the
+        // packet was consumed at the right length and skipped, so adding the mapping changes
+        // nothing else on the wire.
+        m[15] = 221; // camera shake
+        // Commanded loc animation (play a seq on a placed loc). The rev-500 handler at 230 is
+        // fully ported — Client.animateLocation covers every layer including ground decor — but
+        // nothing mapped to it, so scenery could never be animated on command (the loc's own
+        // config animationId, played on spawn, was the only route). 26 is an unused 464 opcode
+        // whose size-table entry is already 7, exactly the body the 230 handler reads:
+        // [g1_alt2 (shape<<2|rot)][g2 seq][g4_alt2 (level<<28|absX<<14|absZ)]. The server sends
+        // it from OutboundPacketHandler.sendLocAnim() (first user: the Penance Queen's trapdoor
+        // burst, seq 5076 on the wave-10 hatch pieces).
+        m[26] = 230; // loc anim (commanded)
+        // Minimap state / blackout (0 normal, 1 no clicking, 2 blacked out). The rev-500
+        // handler at 147 is ported — it sets Client.minimapState, and the minimap draw fills a
+        // flat scanline when the value is 2 or 5 — but nothing mapped to it. The opcodes posted
+        // around for this are other revisions: 317 uses 26/99 and 474 uses 5, and 464's opcode 5
+        // is *play song*. 143 is the one opcode both this table and the SERVER's framing table
+        // size as 1, which is what the handler reads — 223 is 1 here but 0 server-side, so the
+        // server's own guard dropped it before it ever reached the wire.
+        m[143] = 147; // minimap state
+        m[255] = 255; // unset map flag — zero-body clear of the minimap destination red X
+        // (the server sends it from OutboundPacketHandler.sendUnsetMapFlag(); without this
+        // mapping the packet was consumed at size 0 and skipped, leaving the red X pinned
+        // whenever the server cancelled a walk)
         m[160] = 4160; // hint icon — 464 body differs from rev-500 213 (no slot/icon byte)
         m[50] = 6; // PM receive: [i64 name][u16+u24 dedup][u8 rights][huffman] — exact match
         m[23] = 172; // PM sent echo: [i64 to][huffman] — exact match

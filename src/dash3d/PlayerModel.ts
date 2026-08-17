@@ -41,6 +41,18 @@ export default class PlayerModel {
 
     static field2616: ModelSourceCache = new ModelSourceCache(5);
 
+    // SeqType.replaceheldleft/right encoding in the 464/465 cache: `0` hides the hand,
+    // any other value is `objId + 512` — the same offset the packer applies
+    // (2004scape tools/pack/config/SeqConfig.ts, `hide` -> 0 else `ObjPack index + 512`).
+    // Rev-500+ moved to a raw obj id with 65535 as the hide sentinel; decoding it that way
+    // here sent every animated hand to the wrong ObjType. Iban's staff (seq 708,
+    // replaceheldright=1921) became obj 1921 "bowl of water", which has no wear model, so
+    // the staff vanished mid-cast — and the same went for every axe, pickaxe and bow that
+    // a skilling animation puts in your hands. All 1155 seqs carrying these fields hold
+    // either 0 or a value >= 512, which is what makes the offset unambiguous.
+    static readonly REPLACEHELD_HIDE: number = 0;
+    static readonly REPLACEHELD_OBJ_BASE: number = 512;
+
     // jag::oldscape::rs2lib::PlayerModel::SetAppearance
     setAppearance(arg0: number, arg1: Int32Array | null, arg2: Int32Array, arg3: boolean): void {
         if (arg1 === null) {
@@ -116,20 +128,20 @@ export default class PlayerModel {
                 var7[var8] = this.appearance[var8];
             }
             if (arg3.replaceheldleft >= 0) {
-                if (arg3.replaceheldleft === 65535) {
+                if (arg3.replaceheldleft === PlayerModel.REPLACEHELD_HIDE) {
                     var7[5] = 0;
                     var5 ^= 0xffffffff00000000n;
                 } else {
-                    var7[5] = arg3.replaceheldleft | 0x40000000;
+                    var7[5] = (arg3.replaceheldleft - PlayerModel.REPLACEHELD_OBJ_BASE) | 0x40000000;
                     var5 ^= BigInt(var7[5]) << 32n;
                 }
             }
             if (arg3.replaceheldright >= 0) {
-                if (arg3.replaceheldright === 65535) {
+                if (arg3.replaceheldright === PlayerModel.REPLACEHELD_HIDE) {
                     var7[3] = 0;
                     var5 ^= 0xffffffffn;
                 } else {
-                    var7[3] = arg3.replaceheldright | 0x40000000;
+                    var7[3] = (arg3.replaceheldright - PlayerModel.REPLACEHELD_OBJ_BASE) | 0x40000000;
                     var5 ^= BigInt(var7[3]);
                 }
             }

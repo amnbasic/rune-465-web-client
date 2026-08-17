@@ -48,6 +48,40 @@ export default class ClientMouseListener {
         ClientMouseListener.idleTimer = value;
     }
 
+    /**
+     * Event coordinates -> frame coordinates.
+     *
+     * Divide the offset inside the canvas' bounding rect by that rect's size, and multiply by the
+     * backing store. That is correct in EVERY presentation - letterboxed fixed mode, a fill-the-
+     * window resizable frame, browser page zoom, fullscreen - because the bounding rect is the
+     * rendered rect by definition, whatever put it there.
+     *
+     * This used to be four verbatim copies, each with a `document.fullscreenElement !== null`
+     * branch that re-derived the letterbox from window.innerWidth/innerHeight instead. That branch
+     * assumed the canvas was the largest aspect-fit rect in the whole window, but ScreenMode fits
+     * it to innerHeight MINUS the strip it reserves for the settings button, so the two only ever
+     * agreed at the exact centre of the screen. At 1920x1080 the error reached ~22 frame px at the
+     * bottom edge - more than a whole menu row, and enough to make the lower half of the chat-mode
+     * buttons unclickable in fullscreen.
+     */
+    private static toFrame(event: MouseEvent): { x: number; y: number } {
+        const canvas = event.currentTarget as HTMLCanvasElement;
+        const bounds = canvas.getBoundingClientRect();
+        let x = ((event.clientX - bounds.left) * (canvas.width / bounds.width)) | 0;
+        let y = ((event.clientY - bounds.top) * (canvas.height / bounds.height)) | 0;
+        if (x < 0) {
+            x = 0;
+        } else if (x > canvas.width) {
+            x = canvas.width;
+        }
+        if (y < 0) {
+            y = 0;
+        } else if (y > canvas.height) {
+            y = canvas.height;
+        }
+        return { x, y };
+    }
+
     static cycle(): void {
         ClientMouseListener.idleTimer++;
         ClientMouseListener.mouseButton = ClientMouseListener.nextMouseButton;
@@ -72,49 +106,9 @@ export default class ClientMouseListener {
         }
         if (ClientMouseListener.instance) {
             ClientMouseListener.idleTimer = 0;
-            const canvas = event.currentTarget as HTMLCanvasElement;
-            const fixedWidth = canvas.width;
-            const fixedHeight = canvas.height;
-            const bounds = canvas.getBoundingClientRect();
-            const clickX = event.clientX - bounds.left;
-            const clickY = event.clientY - bounds.top;
-            let x = 0;
-            let y = 0;
-            if (document.fullscreenElement !== null) {
-                const gameAspectRatio = fixedWidth / fixedHeight;
-                const ourAspectRatio = window.innerWidth / window.innerHeight;
-                const wider = ourAspectRatio >= gameAspectRatio;
-                let trueCanvasWidth = 0;
-                let trueCanvasHeight = 0;
-                let offsetX = 0;
-                let offsetY = 0;
-                if (wider) {
-                    trueCanvasWidth = window.innerHeight * gameAspectRatio;
-                    trueCanvasHeight = window.innerHeight;
-                    offsetX = (window.innerWidth - trueCanvasWidth) / 2;
-                } else {
-                    trueCanvasWidth = window.innerWidth;
-                    trueCanvasHeight = window.innerWidth / gameAspectRatio;
-                    offsetY = (window.innerHeight - trueCanvasHeight) / 2;
-                }
-                x = ((clickX - offsetX) * (fixedWidth / trueCanvasWidth)) | 0;
-                y = ((clickY - offsetY) * (fixedHeight / trueCanvasHeight)) | 0;
-            } else {
-                x = (clickX * (canvas.width / bounds.width)) | 0;
-                y = (clickY * (canvas.height / bounds.height)) | 0;
-            }
-            if (x < 0) {
-                x = 0;
-            } else if (x > fixedWidth) {
-                x = fixedWidth;
-            }
-            if (y < 0) {
-                y = 0;
-            } else if (y > fixedHeight) {
-                y = fixedHeight;
-            }
-            ClientMouseListener.nextMouseClickX = x;
-            ClientMouseListener.nextMouseClickY = y;
+            const point = ClientMouseListener.toFrame(event);
+            ClientMouseListener.nextMouseClickX = point.x;
+            ClientMouseListener.nextMouseClickY = point.y;
             ClientMouseListener.nextMouseClickTime = MonotonicTime.currentTime();
             const button = event.button === 2 || event.metaKey ? 2 : 1;
             ClientMouseListener.nextMouseClickButton = button;
@@ -149,49 +143,9 @@ export default class ClientMouseListener {
     mouseEntered(event: MouseEvent): void {
         if (ClientMouseListener.instance) {
             ClientMouseListener.idleTimer = 0;
-            const canvas = event.currentTarget as HTMLCanvasElement;
-            const fixedWidth = canvas.width;
-            const fixedHeight = canvas.height;
-            const bounds = canvas.getBoundingClientRect();
-            const clickX = event.clientX - bounds.left;
-            const clickY = event.clientY - bounds.top;
-            let x = 0;
-            let y = 0;
-            if (document.fullscreenElement !== null) {
-                const gameAspectRatio = fixedWidth / fixedHeight;
-                const ourAspectRatio = window.innerWidth / window.innerHeight;
-                const wider = ourAspectRatio >= gameAspectRatio;
-                let trueCanvasWidth = 0;
-                let trueCanvasHeight = 0;
-                let offsetX = 0;
-                let offsetY = 0;
-                if (wider) {
-                    trueCanvasWidth = window.innerHeight * gameAspectRatio;
-                    trueCanvasHeight = window.innerHeight;
-                    offsetX = (window.innerWidth - trueCanvasWidth) / 2;
-                } else {
-                    trueCanvasWidth = window.innerWidth;
-                    trueCanvasHeight = window.innerWidth / gameAspectRatio;
-                    offsetY = (window.innerHeight - trueCanvasHeight) / 2;
-                }
-                x = ((clickX - offsetX) * (fixedWidth / trueCanvasWidth)) | 0;
-                y = ((clickY - offsetY) * (fixedHeight / trueCanvasHeight)) | 0;
-            } else {
-                x = (clickX * (canvas.width / bounds.width)) | 0;
-                y = (clickY * (canvas.height / bounds.height)) | 0;
-            }
-            if (x < 0) {
-                x = 0;
-            } else if (x > fixedWidth) {
-                x = fixedWidth;
-            }
-            if (y < 0) {
-                y = 0;
-            } else if (y > fixedHeight) {
-                y = fixedHeight;
-            }
-            ClientMouseListener.nextMouseX = x;
-            ClientMouseListener.nextMouseY = y;
+            const point = ClientMouseListener.toFrame(event);
+            ClientMouseListener.nextMouseX = point.x;
+            ClientMouseListener.nextMouseY = point.y;
         }
     }
 
@@ -203,101 +157,15 @@ export default class ClientMouseListener {
         }
     }
 
-    mouseDragged(event: MouseEvent): void {
-        if (ClientMouseListener.instance) {
-            ClientMouseListener.idleTimer = 0;
-            const canvas = event.currentTarget as HTMLCanvasElement;
-            const fixedWidth = canvas.width;
-            const fixedHeight = canvas.height;
-            const bounds = canvas.getBoundingClientRect();
-            const clickX = event.clientX - bounds.left;
-            const clickY = event.clientY - bounds.top;
-            let x = 0;
-            let y = 0;
-            if (document.fullscreenElement !== null) {
-                const gameAspectRatio = fixedWidth / fixedHeight;
-                const ourAspectRatio = window.innerWidth / window.innerHeight;
-                const wider = ourAspectRatio >= gameAspectRatio;
-                let trueCanvasWidth = 0;
-                let trueCanvasHeight = 0;
-                let offsetX = 0;
-                let offsetY = 0;
-                if (wider) {
-                    trueCanvasWidth = window.innerHeight * gameAspectRatio;
-                    trueCanvasHeight = window.innerHeight;
-                    offsetX = (window.innerWidth - trueCanvasWidth) / 2;
-                } else {
-                    trueCanvasWidth = window.innerWidth;
-                    trueCanvasHeight = window.innerWidth / gameAspectRatio;
-                    offsetY = (window.innerHeight - trueCanvasHeight) / 2;
-                }
-                x = ((clickX - offsetX) * (fixedWidth / trueCanvasWidth)) | 0;
-                y = ((clickY - offsetY) * (fixedHeight / trueCanvasHeight)) | 0;
-            } else {
-                x = (clickX * (canvas.width / bounds.width)) | 0;
-                y = (clickY * (canvas.height / bounds.height)) | 0;
-            }
-            if (x < 0) {
-                x = 0;
-            } else if (x > fixedWidth) {
-                x = fixedWidth;
-            }
-            if (y < 0) {
-                y = 0;
-            } else if (y > fixedHeight) {
-                y = fixedHeight;
-            }
-            ClientMouseListener.nextMouseX = x;
-            ClientMouseListener.nextMouseY = y;
-        }
-    }
+    // `mouseDragged` used to live here, a fourth verbatim copy of the same coordinate code. It was
+    // dead: addListeners never bound it, and the browser reports drags through mousemove anyway.
 
     mouseMoved(event: MouseEvent): void {
         if (ClientMouseListener.instance) {
             ClientMouseListener.idleTimer = 0;
-            const canvas = event.currentTarget as HTMLCanvasElement;
-            const fixedWidth = canvas.width;
-            const fixedHeight = canvas.height;
-            const bounds = canvas.getBoundingClientRect();
-            const clickX = event.clientX - bounds.left;
-            const clickY = event.clientY - bounds.top;
-            let x = 0;
-            let y = 0;
-            if (document.fullscreenElement !== null) {
-                const gameAspectRatio = fixedWidth / fixedHeight;
-                const ourAspectRatio = window.innerWidth / window.innerHeight;
-                const wider = ourAspectRatio >= gameAspectRatio;
-                let trueCanvasWidth = 0;
-                let trueCanvasHeight = 0;
-                let offsetX = 0;
-                let offsetY = 0;
-                if (wider) {
-                    trueCanvasWidth = window.innerHeight * gameAspectRatio;
-                    trueCanvasHeight = window.innerHeight;
-                    offsetX = (window.innerWidth - trueCanvasWidth) / 2;
-                } else {
-                    trueCanvasWidth = window.innerWidth;
-                    trueCanvasHeight = window.innerWidth / gameAspectRatio;
-                    offsetY = (window.innerHeight - trueCanvasHeight) / 2;
-                }
-                x = ((clickX - offsetX) * (fixedWidth / trueCanvasWidth)) | 0;
-                y = ((clickY - offsetY) * (fixedHeight / trueCanvasHeight)) | 0;
-            } else {
-                x = (clickX * (canvas.width / bounds.width)) | 0;
-                y = (clickY * (canvas.height / bounds.height)) | 0;
-            }
-            if (x < 0) {
-                x = 0;
-            } else if (x > fixedWidth) {
-                x = fixedWidth;
-            }
-            if (y < 0) {
-                y = 0;
-            } else if (y > fixedHeight) {
-                y = fixedHeight;
-            }
-            ClientMouseListener.nextMouseX = x;
-            ClientMouseListener.nextMouseY = y;
+            const point = ClientMouseListener.toFrame(event);
+            ClientMouseListener.nextMouseX = point.x;
+            ClientMouseListener.nextMouseY = point.y;
         }
     }
 

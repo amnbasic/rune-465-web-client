@@ -112,5 +112,5 @@ export const enum ClientProt {
     // options 6-10 (Java opcodes 210/148/104/9/28) are NOT in the server's size table (-3 =
     // swallow buffer) — never send; ifButtonX suppresses them.
     IF_BUTTOND = 132,
-    IF_BUTTONT = 153,
+    IF_BUTTONT = 153
 }

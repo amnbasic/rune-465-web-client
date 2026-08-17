@@ -1,5 +1,6 @@
 import ModelLit from '#/dash3d/ModelLit.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import World from '#/dash3d/World.js';
 import AnimFrameSet from '#/dash3d/AnimFrameSet.js';
 import type ModelUnlit from '#/dash3d/ModelUnlit.js';
 import type { SceneTag } from '#/dash3d/ModelSource.js';
@@ -1091,7 +1092,7 @@ export default class SoftwareModelLit extends ModelLit {
                 }
                 SoftwareModelLit.vertexScreenX[var19] = (var8 + (((var25 << 9) / arg6) | 0)) | 0;
                 SoftwareModelLit.vertexScreenY[var19] = (var9 + (((var28 << 9) / arg6) | 0)) | 0;
-                if (this.numT > 0) {
+                if (this.numT > 0 || this.faceTextureId !== null) {
                     SoftwareModelLit.vertexViewSpaceX[var19] = var25;
                     SoftwareModelLit.vertexViewSpaceY[var19] = var28;
                     SoftwareModelLit.vertexViewSpaceZ[var19] = var29;
@@ -1177,7 +1178,7 @@ export default class SoftwareModelLit extends ModelLit {
                 SoftwareModelLit.vertexScreenZ[var18] = var28 - var17;
                 SoftwareModelLit.vertexScreenX[var18] = var7 + (((var24 << 9) / var28) | 0);
                 SoftwareModelLit.vertexScreenY[var18] = var8 + (((var27 << 9) / var28) | 0);
-                if (this.numT > 0) {
+                if (this.numT > 0 || this.faceTextureId !== null) {
                     SoftwareModelLit.vertexViewSpaceX[var18] = var24;
                     SoftwareModelLit.vertexViewSpaceY[var18] = var27;
                     SoftwareModelLit.vertexViewSpaceZ[var18] = var28;
@@ -1198,30 +1199,32 @@ export default class SoftwareModelLit extends ModelLit {
             return;
         }
         const var14: number = var12 + ((-this.radius * arg2 + this.field2277 * arg1) >> 16);
-        if (var14 >= 3500) {
+        if (var14 >= World.farClip) {
             return;
         }
         const var15: number = (arg7 * arg3 + arg5 * arg4) >> 16;
-        const var16: number = (var15 + this.radius) << 9;
+        const var16: number = (var15 + this.radius) * Pix3D.focal;
         if (((var16 / var13) | 0) <= Pix3D.minX) {
             return;
         }
-        const var17: number = (var15 - this.radius) << 9;
+        const var17: number = (var15 - this.radius) * Pix3D.focal;
         if (((var17 / var13) | 0) >= Pix3D.maxX) {
             return;
         }
         const var18: number = (arg6 * arg2 - var11 * arg1) >> 16;
-        const var19: number = (var18 + ((this.radius * arg1 + this.maxY * arg2) >> 16)) << 9;
+        const var19: number = (var18 + ((this.radius * arg1 + this.maxY * arg2) >> 16)) * Pix3D.focal;
         if (((var19 / var13) | 0) <= Pix3D.minY) {
             return;
         }
-        const var20: number = (var18 + ((-this.radius * arg1 + this.field2277 * arg2) >> 16)) << 9;
+        const var20: number = (var18 + ((-this.radius * arg1 + this.field2277 * arg2) >> 16)) * Pix3D.focal;
         if (((var20 / var13) | 0) >= Pix3D.maxY) {
             return;
         }
         let var21: boolean = false;
         const var22: boolean = var14 <= 50;
-        const var23: boolean = var22 || this.numT > 0;
+        // Textured faces whose PMN fall back to the face's own vertices (axis -1 / numT 0) read
+        // vertexViewSpace* too — without this the texture plane comes from the PREVIOUS model.
+        const var23: boolean = var22 || this.numT > 0 || this.faceTextureId !== null;
         const var24: number = Pix3D.originX;
         const var25: number = Pix3D.originY;
         let var26: number = 0;
@@ -1275,8 +1278,8 @@ export default class SoftwareModelLit extends ModelLit {
                     const var51: number = (var46 * arg2 - var49 * arg1) >> 16;
                     const var52: number = (var46 * arg1 + var49 * arg2) >> 16;
                     if (var52 > 0) {
-                        const var53: number = ((var48 << 9) / var52) | 0;
-                        const var54: number = ((var51 << 9) / var52) | 0;
+                        const var53: number = ((var48 * Pix3D.focal) / var52) | 0;
+                        const var54: number = ((var51 * Pix3D.focal) / var52) | 0;
                         if (var53 < var33) {
                             var33 = var53;
                         }
@@ -1318,8 +1321,8 @@ export default class SoftwareModelLit extends ModelLit {
             const var67: number = (var61 * arg1 + var64 * arg2) >> 16;
             SoftwareModelLit.vertexScreenZ[var55] = var67 - var12;
             if (var67 >= 50) {
-                SoftwareModelLit.vertexScreenX[var55] = var24 + (((var63 << 9) / var67) | 0);
-                SoftwareModelLit.vertexScreenY[var55] = var25 + (((var66 << 9) / var67) | 0);
+                SoftwareModelLit.vertexScreenX[var55] = var24 + (((var63 * Pix3D.focal) / var67) | 0);
+                SoftwareModelLit.vertexScreenY[var55] = var25 + (((var66 * Pix3D.focal) / var67) | 0);
             } else {
                 SoftwareModelLit.vertexScreenX[var55] = -5000;
                 var21 = true;
@@ -1389,15 +1392,15 @@ export default class SoftwareModelLit extends ModelLit {
             const var13: number = this.faceColourA![arg0];
             if (var10 >= 50) {
                 const var14: number = (50 - var8) * Pix3D.divTable2[var10 - var8];
-                SoftwareModelLit.clippedX[0] = var2 + ((((var11 + (((SoftwareModelLit.vertexViewSpaceX[var7] - var11) * var14) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[0] = var3 + ((((var12 + (((SoftwareModelLit.vertexViewSpaceY[var7] - var12) * var14) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[0] = var2 + ((((var11 + (((SoftwareModelLit.vertexViewSpaceX[var7] - var11) * var14) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[0] = var3 + ((((var12 + (((SoftwareModelLit.vertexViewSpaceY[var7] - var12) * var14) >> 16)) * Pix3D.focal) / 50) | 0);
                 var4++;
                 SoftwareModelLit.clippedColour[0] = var13 + (((this.faceColourC![arg0] - var13) * var14) >> 16);
             }
             if (var9 >= 50) {
                 const var15: number = (50 - var8) * Pix3D.divTable2[var9 - var8];
-                SoftwareModelLit.clippedX[var4] = var2 + ((((var11 + (((SoftwareModelLit.vertexViewSpaceX[var6] - var11) * var15) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[var4] = var3 + ((((var12 + (((SoftwareModelLit.vertexViewSpaceY[var6] - var12) * var15) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[var4] = var2 + ((((var11 + (((SoftwareModelLit.vertexViewSpaceX[var6] - var11) * var15) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[var4] = var3 + ((((var12 + (((SoftwareModelLit.vertexViewSpaceY[var6] - var12) * var15) >> 16)) * Pix3D.focal) / 50) | 0);
                 SoftwareModelLit.clippedColour[var4++] = var13 + (((this.faceColourB![arg0] - var13) * var15) >> 16);
             }
         }
@@ -1411,14 +1414,14 @@ export default class SoftwareModelLit extends ModelLit {
             const var18: number = this.faceColourB![arg0];
             if (var8 >= 50) {
                 const var19: number = (50 - var9) * Pix3D.divTable2[var8 - var9];
-                SoftwareModelLit.clippedX[var4] = var2 + ((((var16 + (((SoftwareModelLit.vertexViewSpaceX[var5] - var16) * var19) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[var4] = var3 + ((((var17 + (((SoftwareModelLit.vertexViewSpaceY[var5] - var17) * var19) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[var4] = var2 + ((((var16 + (((SoftwareModelLit.vertexViewSpaceX[var5] - var16) * var19) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[var4] = var3 + ((((var17 + (((SoftwareModelLit.vertexViewSpaceY[var5] - var17) * var19) >> 16)) * Pix3D.focal) / 50) | 0);
                 SoftwareModelLit.clippedColour[var4++] = var18 + (((this.faceColourA![arg0] - var18) * var19) >> 16);
             }
             if (var10 >= 50) {
                 const var20: number = (50 - var9) * Pix3D.divTable2[var10 - var9];
-                SoftwareModelLit.clippedX[var4] = var2 + ((((var16 + (((SoftwareModelLit.vertexViewSpaceX[var7] - var16) * var20) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[var4] = var3 + ((((var17 + (((SoftwareModelLit.vertexViewSpaceY[var7] - var17) * var20) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[var4] = var2 + ((((var16 + (((SoftwareModelLit.vertexViewSpaceX[var7] - var16) * var20) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[var4] = var3 + ((((var17 + (((SoftwareModelLit.vertexViewSpaceY[var7] - var17) * var20) >> 16)) * Pix3D.focal) / 50) | 0);
                 SoftwareModelLit.clippedColour[var4++] = var18 + (((this.faceColourC![arg0] - var18) * var20) >> 16);
             }
         }
@@ -1432,14 +1435,14 @@ export default class SoftwareModelLit extends ModelLit {
             const var23: number = this.faceColourC![arg0];
             if (var9 >= 50) {
                 const var24: number = (50 - var10) * Pix3D.divTable2[var9 - var10];
-                SoftwareModelLit.clippedX[var4] = var2 + ((((var21 + (((SoftwareModelLit.vertexViewSpaceX[var6] - var21) * var24) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[var4] = var3 + ((((var22 + (((SoftwareModelLit.vertexViewSpaceY[var6] - var22) * var24) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[var4] = var2 + ((((var21 + (((SoftwareModelLit.vertexViewSpaceX[var6] - var21) * var24) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[var4] = var3 + ((((var22 + (((SoftwareModelLit.vertexViewSpaceY[var6] - var22) * var24) >> 16)) * Pix3D.focal) / 50) | 0);
                 SoftwareModelLit.clippedColour[var4++] = var23 + (((this.faceColourB![arg0] - var23) * var24) >> 16);
             }
             if (var8 >= 50) {
                 const var25: number = (50 - var10) * Pix3D.divTable2[var8 - var10];
-                SoftwareModelLit.clippedX[var4] = var2 + ((((var21 + (((SoftwareModelLit.vertexViewSpaceX[var5] - var21) * var25) >> 16)) << 9) / 50) | 0);
-                SoftwareModelLit.clippedY[var4] = var3 + ((((var22 + (((SoftwareModelLit.vertexViewSpaceY[var5] - var22) * var25) >> 16)) << 9) / 50) | 0);
+                SoftwareModelLit.clippedX[var4] = var2 + ((((var21 + (((SoftwareModelLit.vertexViewSpaceX[var5] - var21) * var25) >> 16)) * Pix3D.focal) / 50) | 0);
+                SoftwareModelLit.clippedY[var4] = var3 + ((((var22 + (((SoftwareModelLit.vertexViewSpaceY[var5] - var22) * var25) >> 16)) * Pix3D.focal) / 50) | 0);
                 SoftwareModelLit.clippedColour[var4++] = var23 + (((this.faceColourA![arg0] - var23) * var25) >> 16);
             }
         }

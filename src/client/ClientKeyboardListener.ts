@@ -242,6 +242,57 @@ export default class ClientKeyboardListener {
         map[222] = 58;
     }
 
+    /**
+     * Push a typed character into the same buffer keyTyped() fills.
+     *
+     * Exists for the on-screen keyboard (MobileKeyboard): iOS will not raise a soft keyboard
+     * for a <canvas>, so touch devices type into a hidden <input> instead and the characters
+     * arrive here rather than as key events. Everything downstream — pollKey, and the login
+     * and chat readers that call it — is unchanged and cannot tell the difference.
+     *
+     * Writing the buffer directly rather than synthesising a KeyboardEvent is deliberate: a
+     * fabricated event would have to guess keyCode/charCode pairs that iOS does not report
+     * consistently (it sends 229 for anything going through the IME), and getKeyChar would
+     * then throw away exactly the characters we are trying to deliver.
+     */
+    static injectChar(ch: number): void {
+        if (!ClientKeyboardListener.instance || ch <= 0 || ch >= 256) {
+            return;
+        }
+        ClientKeyboardListener.idleTimer = 0;
+        const next = (ClientKeyboardListener.keyWritePos + 1) & 0x7f;
+        if (ClientKeyboardListener.keyReadPos !== next) {
+            ClientKeyboardListener.keyCodeBuffer[ClientKeyboardListener.keyWritePos] = -1;
+            ClientKeyboardListener.keyChBuffer[ClientKeyboardListener.keyWritePos] = ch;
+            ClientKeyboardListener.keyWritePos = next;
+        }
+    }
+
+    /**
+     * Push an already-mapped key code (the values in KEY_CODE_MAP, not a DOM keyCode) into the
+     * same buffer keyPressed() fills. Used for Enter (84) and Backspace (85), which are the two
+     * non-printable keys the login screen and chat actually need.
+     */
+    static injectCode(code: number): void {
+        if (!ClientKeyboardListener.instance || code < 0) {
+            return;
+        }
+        ClientKeyboardListener.idleTimer = 0;
+        if (ClientKeyboardListener.keyHeldWritePos >= 0) {
+            ClientKeyboardListener.keyHeldBuffer[ClientKeyboardListener.keyHeldWritePos] = code;
+            ClientKeyboardListener.keyHeldWritePos = (ClientKeyboardListener.keyHeldWritePos + 1) & 0x7f;
+            if (ClientKeyboardListener.keyHeldWritePos === ClientKeyboardListener.keyHeldReadPos) {
+                ClientKeyboardListener.keyHeldWritePos = -1;
+            }
+        }
+        const next = (ClientKeyboardListener.keyWritePos + 1) & 0x7f;
+        if (next !== ClientKeyboardListener.keyReadPos) {
+            ClientKeyboardListener.keyCodeBuffer[ClientKeyboardListener.keyWritePos] = code;
+            ClientKeyboardListener.keyChBuffer[ClientKeyboardListener.keyWritePos] = -1;
+            ClientKeyboardListener.keyWritePos = next;
+        }
+    }
+
     static pollKey(): boolean {
         if (ClientKeyboardListener.keyReadPos === ClientKeyboardListener.lastKeyWritePos) {
             return false;

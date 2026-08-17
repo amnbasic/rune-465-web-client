@@ -71,11 +71,7 @@ async function fetchGroup(cacheId: number, fileId: number, label: string): Promi
     const compType = container[0];
     const compLen = container.readUInt32BE(1);
     const comp = compType === 0 ? 'none' : compType === 1 ? 'bzip2' : compType === 2 ? 'gzip' : `?${compType}`;
-    console.log(
-        `[probe] ${label} (${cacheId}:${fileId}): wire=${wire.length}B deblocked=${db.length}B ` +
-            `hdr=[${hdrCache}:${hdrFile}] compType=${compType}(${comp}) compLen=${compLen} ` +
-            `first16=${container.subarray(0, 16).toString('hex')}`
-    );
+    console.log(`[probe] ${label} (${cacheId}:${fileId}): wire=${wire.length}B deblocked=${db.length}B ` + `hdr=[${hdrCache}:${hdrFile}] compType=${compType}(${comp}) compLen=${compLen} ` + `first16=${container.subarray(0, 16).toString('hex')}`);
 }
 
 sock.on('connect', async () => {

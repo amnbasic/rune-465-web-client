@@ -3,7 +3,18 @@ import type { ServerWebSocket } from 'bun';
 import { stat, appendFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 
-const listenHost = Bun.env.LISTEN_HOST ?? '127.0.0.1';
+// Bind on every interface so other devices on the LAN — a phone on the same Wi-Fi — can
+// reach the client. Loopback-only was the default and meant the page was unreachable from
+// anything but this machine, which is not a useful default for a server you are testing.
+//
+// Only the proxy's own port is exposed by this. The upstreams below stay on 127.0.0.1: the
+// proxy reaches the game server locally, so the raw TCP gateway (43594) and the JS5 HTTP
+// port are not opened to the network by this change.
+//
+// Access is gated at the firewall rather than here — the inbound rule for this port is
+// scoped to LocalSubnet, so it is the LAN and nothing beyond it. Set LISTEN_HOST=127.0.0.1
+// to go back to loopback-only.
+const listenHost = Bun.env.LISTEN_HOST ?? '0.0.0.0';
 const listenPort = readPort('LISTEN_PORT', 8080);
 const upstreamHost = Bun.env.UPSTREAM_HOST ?? '127.0.0.1';
 const httpUpstreamHost = Bun.env.HTTP_UPSTREAM_HOST ?? upstreamHost;
@@ -234,14 +245,35 @@ async function serveStatic(req: Request): Promise<Response | undefined> {
         }
 
         const file = Bun.file(filePath);
-        const headers: Record<string, string> = {
-            'cache-control': 'no-store'
-        };
-        if (filePath.toLowerCase().endsWith('.ws')) {
+        const lower = filePath.toLowerCase();
+        const headers: Record<string, string> = {};
+
+        if (lower.endsWith('.ws')) {
+            // Synthetic server-list documents: always fresh, never stored.
             headers['content-type'] = 'text/html; charset=utf-8';
+            headers['cache-control'] = 'no-store';
+        } else if (lower.endsWith('index.html')) {
+            // The entry document. Tiny, and the one thing that must never be stale.
+            headers['cache-control'] = 'no-store';
+        } else {
+            // Everything else — above all public/client/client.js, which is 1.7 MB — was also
+            // `no-store`, so the whole bundle was re-downloaded on every single launch. That is
+            // paid on mobile data, and it makes a home-screen app's cold start miserable.
+            //
+            // `no-cache` rather than a long `immutable`: the browser still asks on every load, but
+            // an unchanged file answers 304 with no body. Same saving as immutable caching without
+            // its trap — a standalone home-screen app has no reload button and no URL bar, so a
+            // bad bundle pinned as immutable would be unrecoverable short of deleting and
+            // reinstalling the app. Validated caching cannot get stuck.
+            headers['cache-control'] = 'no-cache';
+            headers['etag'] = `W/"${fileStat.size.toString(16)}-${Math.trunc(fileStat.mtimeMs).toString(16)}"`;
         }
-        const responseInit = { headers };
-        return new Response(req.method === 'HEAD' ? undefined : file, responseInit);
+
+        const etag = headers['etag'];
+        if (etag !== undefined && req.headers.get('if-none-match') === etag) {
+            return new Response(undefined, { status: 304, headers });
+        }
+        return new Response(req.method === 'HEAD' ? undefined : file, { headers });
     } catch {
         return undefined;
     }

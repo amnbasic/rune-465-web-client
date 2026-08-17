@@ -14,6 +14,12 @@ export default class ClientStream {
     private readonly wsout: WebSocketWriter;
     private remoteClosed: boolean = false;
 
+    // True once the peer has closed/errored the socket. loginPoll uses this to abandon a dead
+    // login attempt immediately instead of idling on it for the full 2000-tick timeout.
+    get closed(): boolean {
+        return this.remoteClosed;
+    }
+
     constructor(arg0: WebSocket);
     constructor(arg0: WebSocket, arg1: unknown);
     constructor(arg0: WebSocket, arg1: unknown = null) {

@@ -1,0 +1,60 @@
+{
+ "tokens": {
+  "SURFACE": "#3b342c",
+  "SURFACE_LOW": "#2a251f",
+  "EDGE": "#564c3c",
+  "CELL": "#5c5142",
+  "CELL_LOW": "#483d31",
+  "ACTIVE": "#8c3a33",
+  "ACTIVE_LOW": "#6b2a24",
+  "R_PANEL": 12,
+  "R_CELL": 8
+ },
+ "files": [
+  {
+   "name": "tabrow_upper_backdrop",
+   "w": 249,
+   "h": 45
+  },
+  {
+   "name": "tabrow_lower_backdrop",
+   "w": 269,
+   "h": 37
+  },
+  {
+   "name": "chatbar_backdrop",
+   "w": 496,
+   "h": 50
+  },
+  {
+   "name": "tabplate_wide",
+   "w": 34,
+   "h": 36
+  },
+  {
+   "name": "tabplate_wide_idle",
+   "w": 34,
+   "h": 36
+  },
+  {
+   "name": "tabplate_narrow",
+   "w": 30,
+   "h": 37
+  },
+  {
+   "name": "tabplate_narrow_idle",
+   "w": 30,
+   "h": 37
+  },
+  {
+   "name": "tabplate_inventory",
+   "w": 44,
+   "h": 35
+  },
+  {
+   "name": "tabplate_inventory_idle",
+   "w": 44,
+   "h": 35
+  }
+ ]
+}

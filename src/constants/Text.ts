@@ -134,6 +134,9 @@ export default class Text {
     static chooseoption: string = 'Choose Option';
     static moreoptions: string = ' more options';
     static walkhere: string = 'Walk here';
+    // Custom, admin-only ground option (Client.TELEPORT_HERE). Not a cache string, so it has no
+    // localised form - it is a staff tool, and the server is what actually gates it.
+    static teleporthere: string = 'Teleport here';
     static level: string = 'level-';
     static skill: string = 'skill-';
     static pleasewait: string = 'Please wait...';

@@ -143,8 +143,7 @@ sock.on('connect', async () => {
         if (sane) newSane++;
         if (!oldSane) oldBad++;
         console.log(
-            `  script ${String(g).padStart(4)}: NEW intLocal=${nw.intLocal} strLocal=${nw.strLocal} instr=${nw.instr} ${sane ? '✓' : '✗'}` +
-                `   |  OLD intLocal=${old.intLocal} strLocal=${old.strLocal} ${oldSane ? '' : '(GARBAGE -> crash)'}`
+            `  script ${String(g).padStart(4)}: NEW intLocal=${nw.intLocal} strLocal=${nw.strLocal} instr=${nw.instr} ${sane ? '✓' : '✗'}` + `   |  OLD intLocal=${old.intLocal} strLocal=${old.strLocal} ${oldSane ? '' : '(GARBAGE -> crash)'}`
         );
     }
     console.log(`\n[verify] NEW decode: ${newSane}/${sample.length} sane   |   OLD decode: ${oldBad}/${sample.length} garbage`);

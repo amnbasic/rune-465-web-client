@@ -1,4 +1,5 @@
 import Pix2D from '#/graphics/Pix2D.js';
+import GlRenderer from '#/dash3d/GlRenderer.js';
 import type TextureProvider from '#/dash3d/TextureProvider.js';
 import IntMath from '#/util/IntMath.js';
 
@@ -60,6 +61,18 @@ export default class Pix3D {
             Pix3D.cosTable[i] = (Math.cos(i * 0.0030679615) * 65536.0) | 0;
         }
     }
+
+    /**
+     * Scene-pass projection focal (512 = the engine's baked baseline, i.e. the old `<< 9`). The
+     * scene bracket in Client.gameDrawMain divides it by the render scale so the half-res pass
+     * projects to match its half-size scratch buffer, then puts it back to 512 - every UI pass
+     * (item icons, interface models) must project at 512 or it draws scaled.
+     *
+     * So it only ever holds 512 or 256, and only for the duration of the scene. Overlays that
+     * project into FRAME pixels (Client.getOverlayPos) keep the literal `<< 9`: the half-res
+     * scratch is upscaled back by the same factor, which cancels out.
+     */
+    static focal: number = 512;
 
     // jag::oldscape::dash3d::Pix3D::SetRenderClipping
     static setRenderClipping(): void {
@@ -214,6 +227,11 @@ export default class Pix3D {
     }
 
     static gouraudTriangle(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number, arg5: number, arg6: number, arg7: number, arg8: number): void {
+        if (GlRenderer.active) {
+            // GPU path: args are (y0,y1,y2, x0,x1,x2, palette c0,c1,c2)
+            GlRenderer.pushTriangle(arg3, arg0, Pix3D.colourTable[arg6 & 0xffff], arg4, arg1, Pix3D.colourTable[arg7 & 0xffff], arg5, arg2, Pix3D.colourTable[arg8 & 0xffff], (256 - Pix3D.trans) / 256);
+            return;
+        }
         const var9 = arg4 - arg3;
         const var10 = arg1 - arg0;
         const var11 = arg5 - arg3;
@@ -761,6 +779,11 @@ export default class Pix3D {
     }
 
     static flatTriangle(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number, arg5: number, arg6: number): void {
+        if (GlRenderer.active) {
+            // GPU path: args are (y0,y1,y2, x0,x1,x2, raw RGB)
+            GlRenderer.pushTriangle(arg3, arg0, arg6, arg4, arg1, arg6, arg5, arg2, arg6, (256 - Pix3D.trans) / 256);
+            return;
+        }
         let var7: number = 0;
         if (arg1 !== arg0) {
             var7 = (((arg4 - arg3) << 16) / (arg1 - arg0)) | 0;
@@ -1264,8 +1287,15 @@ export default class Pix3D {
         arg17: number,
         arg18: number
     ): void {
+        if (GlRenderer.active) {
+            Pix3D.glTexturedFace(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15, arg16, arg17, arg18);
+            return;
+        }
         const var19 = Pix3D.textureManager!.getTexels(Pix3D.brightness, arg18);
-        if (var19 === null || Pix3D.trans > 10) {
+        // 464 parity: the textured path ignores face alpha (Rasterizer3D.method552 never reads
+        // anInt3531); the only fallback is texels-not-ready. A trans>10 fallback here flat-filled
+        // alpha'd canopy faces as solid average-colour triangles.
+        if (var19 === null) {
             const var20 = Pix3D.textureManager!.getAverageRgb(arg18);
             Pix3D.textureFallback = true;
             Pix3D.gouraudTriangle(arg0, arg1, arg2, arg3, arg4, arg5, Pix3D.textureLightColour(var20, arg6), Pix3D.textureLightColour(var20, arg7), Pix3D.textureLightColour(var20, arg8));
@@ -1304,14 +1334,26 @@ export default class Pix3D {
         const var37 = arg14 - arg12;
         const var38 = arg17 - arg15;
         const var39 = (var36 * arg12 - var37 * arg9) << 14;
-        const var40 = (var37 * arg15 - var38 * arg12) << 8;
-        const var41 = (var38 * arg9 - var36 * arg15) << 5;
+        let var40 = (var37 * arg15 - var38 * arg12) << 8;
+        let var41 = (var38 * arg9 - var36 * arg15) << 5;
         const var42 = (var33 * arg12 - var34 * arg9) << 14;
-        const var43 = (var34 * arg15 - var35 * arg12) << 8;
-        const var44 = (var35 * arg9 - var33 * arg15) << 5;
+        let var43 = (var34 * arg15 - var35 * arg12) << 8;
+        let var44 = (var35 * arg9 - var33 * arg15) << 5;
         const var45 = (var34 * var36 - var33 * var37) << 14;
-        const var46 = (var35 * var37 - var34 * var38) << 8;
-        const var47 = (var33 * var38 - var35 * var36) << 5;
+        let var46 = (var35 * var37 - var34 * var38) << 8;
+        let var47 = (var33 * var38 - var35 * var36) << 5;
+        if (Pix3D.focal !== 512) {
+            // The mapper's plane functions are u = f1/f3, v = f2/f3 with f = base + x*xstep +
+            // y*ystep. The BASE terms (<< 14) bake focal 512; the six STEP terms are per-screen-
+            // pixel, so they rescale by 512/focal to match vertices projected with the scene
+            // focal. float64 is exact here (|terms| < 2^37 << 2^53).
+            var40 = ((var40 * 512) / Pix3D.focal) | 0;
+            var41 = ((var41 * 512) / Pix3D.focal) | 0;
+            var43 = ((var43 * 512) / Pix3D.focal) | 0;
+            var44 = ((var44 * 512) / Pix3D.focal) | 0;
+            var46 = ((var46 * 512) / Pix3D.focal) | 0;
+            var47 = ((var47 * 512) / Pix3D.focal) | 0;
+        }
         if (arg0 <= arg1 && arg0 <= arg2) {
             if (arg0 < Pix3D.sizeY) {
                 if (arg1 > Pix3D.sizeY) {
@@ -1862,6 +1904,13 @@ export default class Pix3D {
             } else {
                 var79 = Math.trunc(var75 / var78) | 0;
                 var80 = Math.trunc(var76 / var78) | 0;
+                // 464 parity (Rasterizer3D.method552): clamp u at span start so the packed u/v
+                // word never wraps past the texture edge on silhouette spans
+                if (var79 < 0) {
+                    var79 = 0;
+                } else if (var79 > 16256) {
+                    var79 = 16256;
+                }
             }
             let var81 = (var75 + arg10) | 0;
             let var82 = (var76 + arg11) | 0;
@@ -1875,6 +1924,11 @@ export default class Pix3D {
             } else {
                 var85 = Math.trunc(var81 / var84) | 0;
                 var86 = Math.trunc(var82 / var84) | 0;
+                if (var85 < 7) {
+                    var85 = 7;
+                } else if (var85 > 16256) {
+                    var85 = 16256;
+                }
             }
             let var87 = ((var79 << 18) + var80) | 0;
             let var88 = ((((var85 - var79) >> 3) << 18) + ((var86 - var80) >> 3)) | 0;
@@ -1913,12 +1967,17 @@ export default class Pix3D {
                         var82 = (var82 + arg11) | 0;
                         var83 = (var83 + arg12) | 0;
                         const var109 = var83 >> 14;
-                        if (var109 === 0) {
-                            var85 = 0;
-                            var86 = 0;
-                        } else {
+                        // 464 parity: on a zero divisor keep the previous block-end u/v (the step
+                        // collapses to 0 and the span freezes on the last valid texel) instead of
+                        // streaming toward texel (0,0)
+                        if (var109 !== 0) {
                             var85 = Math.trunc(var81 / var109) | 0;
                             var86 = Math.trunc(var82 / var109) | 0;
+                            if (var85 < 7) {
+                                var85 = 7;
+                            } else if (var85 > 16256) {
+                                var85 = 16256;
+                            }
                         }
                         var87 = ((var107 << 18) + var108) | 0;
                         var88 = ((((var85 - var107) >> 3) << 18) + ((var86 - var108) >> 3)) | 0;
@@ -1993,12 +2052,14 @@ export default class Pix3D {
                         var82 = (var82 + arg11) | 0;
                         var83 = (var83 + arg12) | 0;
                         const var129 = var83 >> 14;
-                        if (var129 === 0) {
-                            var85 = 0;
-                            var86 = 0;
-                        } else {
+                        if (var129 !== 0) {
                             var85 = Math.trunc(var81 / var129) | 0;
                             var86 = Math.trunc(var82 / var129) | 0;
+                            if (var85 < 7) {
+                                var85 = 7;
+                            } else if (var85 > 16256) {
+                                var85 = 16256;
+                            }
                         }
                         var87 = ((var127 << 18) + var128) | 0;
                         var88 = ((((var85 - var127) >> 3) << 18) + ((var86 - var128) >> 3)) | 0;
@@ -2036,6 +2097,11 @@ export default class Pix3D {
         } else {
             var21 = Math.trunc(var17 / var20) | 0;
             var22 = Math.trunc(var18 / var20) | 0;
+            if (var21 < 0) {
+                var21 = 0;
+            } else if (var21 > 4032) {
+                var21 = 4032;
+            }
         }
         let var23 = (var17 + arg10) | 0;
         let var24 = (var18 + arg11) | 0;
@@ -2049,6 +2115,11 @@ export default class Pix3D {
         } else {
             var27 = Math.trunc(var23 / var26) | 0;
             var28 = Math.trunc(var24 / var26) | 0;
+            if (var27 < 7) {
+                var27 = 7;
+            } else if (var27 > 4032) {
+                var27 = 4032;
+            }
         }
         let var29 = ((var21 << 20) + var22) | 0;
         let var30 = ((((var27 - var21) >> 3) << 20) + ((var28 - var22) >> 3)) | 0;
@@ -2087,12 +2158,14 @@ export default class Pix3D {
                     var24 = (var24 + arg11) | 0;
                     var25 = (var25 + arg12) | 0;
                     const var51 = var25 >> 12;
-                    if (var51 === 0) {
-                        var27 = 0;
-                        var28 = 0;
-                    } else {
+                    if (var51 !== 0) {
                         var27 = Math.trunc(var23 / var51) | 0;
                         var28 = Math.trunc(var24 / var51) | 0;
+                        if (var27 < 7) {
+                            var27 = 7;
+                        } else if (var27 > 4032) {
+                            var27 = 4032;
+                        }
                     }
                     var29 = ((var49 << 20) + var50) | 0;
                     var30 = ((((var27 - var49) >> 3) << 20) + ((var28 - var50) >> 3)) | 0;
@@ -2168,12 +2241,14 @@ export default class Pix3D {
                 var24 = (var24 + arg11) | 0;
                 var25 = (var25 + arg12) | 0;
                 const var71 = var25 >> 12;
-                if (var71 === 0) {
-                    var27 = 0;
-                    var28 = 0;
-                } else {
+                if (var71 !== 0) {
                     var27 = Math.trunc(var23 / var71) | 0;
                     var28 = Math.trunc(var24 / var71) | 0;
+                    if (var27 < 7) {
+                        var27 = 7;
+                    } else if (var27 > 4032) {
+                        var27 = 4032;
+                    }
                 }
                 var29 = ((var69 << 20) + var70) | 0;
                 var30 = ((((var27 - var69) >> 3) << 20) + ((var28 - var70) >> 3)) | 0;
@@ -2220,6 +2295,12 @@ export default class Pix3D {
         arg17: number,
         arg18: number
     ): void {
+        if (GlRenderer.active) {
+            // GPU ground textures use the PERSPECTIVE plane math (the affine span walk was only
+            // ever a CPU shortcut) — strictly better than software.
+            Pix3D.glTexturedFace(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15, arg16, arg17, arg18);
+            return;
+        }
         const var19 = Pix3D.textureManager!.getTexels(Pix3D.brightness, arg18);
         if (var19 === null) {
             const var20 = Pix3D.textureManager!.getAverageRgb(arg18);
@@ -2259,14 +2340,23 @@ export default class Pix3D {
         const var37 = arg14 - arg12;
         const var38 = arg17 - arg15;
         const var39 = (var36 * arg12 - var37 * arg9) << 14;
-        const var40 = (var37 * arg15 - var38 * arg12) << 5;
-        const var41 = (var38 * arg9 - var36 * arg15) << 5;
+        let var40 = (var37 * arg15 - var38 * arg12) << 5;
+        let var41 = (var38 * arg9 - var36 * arg15) << 5;
         const var42 = (var33 * arg12 - var34 * arg9) << 14;
-        const var43 = (var34 * arg15 - var35 * arg12) << 5;
-        const var44 = (var35 * arg9 - var33 * arg15) << 5;
+        let var43 = (var34 * arg15 - var35 * arg12) << 5;
+        let var44 = (var35 * arg9 - var33 * arg15) << 5;
         const var45 = (var34 * var36 - var33 * var37) << 14;
-        const var46 = (var35 * var37 - var34 * var38) << 5;
-        const var47 = (var33 * var38 - var35 * var36) << 5;
+        let var46 = (var35 * var37 - var34 * var38) << 5;
+        let var47 = (var33 * var38 - var35 * var36) << 5;
+        if (Pix3D.focal !== 512) {
+            // Same six-step-term rescale as the model texture mapper above (ground mapper).
+            var40 = ((var40 * 512) / Pix3D.focal) | 0;
+            var41 = ((var41 * 512) / Pix3D.focal) | 0;
+            var43 = ((var43 * 512) / Pix3D.focal) | 0;
+            var44 = ((var44 * 512) / Pix3D.focal) | 0;
+            var46 = ((var46 * 512) / Pix3D.focal) | 0;
+            var47 = ((var47 * 512) / Pix3D.focal) | 0;
+        }
         if (arg0 <= arg1 && arg0 <= arg2) {
             if (arg0 < Pix3D.sizeY) {
                 if (arg1 > Pix3D.sizeY) {
@@ -2818,6 +2908,11 @@ export default class Pix3D {
             } else {
                 var73 = Math.trunc(var69 / var72) | 0;
                 var74 = Math.trunc(var70 / var72) | 0;
+                if (var73 < 0) {
+                    var73 = 0;
+                } else if (var73 > 16256) {
+                    var73 = 16256;
+                }
             }
             const var75 = (var69 + ((arg10 * var15) | 0)) | 0;
             const var76 = (var70 + ((arg11 * var15) | 0)) | 0;
@@ -2831,6 +2926,11 @@ export default class Pix3D {
             } else {
                 var79 = Math.trunc(var75 / var78) | 0;
                 var80 = Math.trunc(var76 / var78) | 0;
+                if (var79 < 7) {
+                    var79 = 7;
+                } else if (var79 > 16256) {
+                    var79 = 16256;
+                }
             }
             let var81 = ((var73 << 18) + var74) | 0;
             const var82 = ((Math.trunc(((var79 - var73) | 0) / var15) << 18) + Math.trunc(((var80 - var74) | 0) / var15)) | 0;
@@ -2964,6 +3064,11 @@ export default class Pix3D {
         } else {
             var21 = Math.trunc(var17 / var20) | 0;
             var22 = Math.trunc(var18 / var20) | 0;
+            if (var21 < 0) {
+                var21 = 0;
+            } else if (var21 > 4032) {
+                var21 = 4032;
+            }
         }
         const var23 = (var17 + ((arg10 * var15) | 0)) | 0;
         const var24 = (var18 + ((arg11 * var15) | 0)) | 0;
@@ -2977,6 +3082,11 @@ export default class Pix3D {
         } else {
             var27 = Math.trunc(var23 / var26) | 0;
             var28 = Math.trunc(var24 / var26) | 0;
+            if (var27 < 7) {
+                var27 = 7;
+            } else if (var27 > 4032) {
+                var27 = 4032;
+            }
         }
         let var29 = ((var21 << 20) + var22) | 0;
         const var30 = ((Math.trunc(((var27 - var21) | 0) / var15) << 20) + Math.trunc(((var28 - var22) | 0) / var15)) | 0;
@@ -3099,6 +3209,64 @@ export default class Pix3D {
     }
 
     // jag::oldscape::dash3d::Pix3D::TextureLightColour
+    /**
+     * GPU textured face: evaluate the software mapper's SCREEN-LINEAR plane functions f1/f2/f3
+     * (u = f1/f3, v = f2/f3, texel units) at the three screen vertices and hand them to the GL
+     * varyings — linear interpolation of linear functions makes the fragment shader's divides
+     * perspective-exact. Base terms bake focal 512 (<<14 = coeff*512*32); x-steps (<<8) are per-8px
+     * spans (hence /8 per pixel), y-steps (<<5) per row; steps rescale by 512/focal exactly like
+     * the software path. Falls back to the average-colour gouraud while the texture is still
+     * downloading or the atlas is full.
+     */
+    private static glTexturedFace(
+        y0: number, y1: number, y2: number, x0: number, x1: number, x2: number,
+        l0: number, l1: number, l2: number,
+        arg9: number, arg10: number, arg11: number, arg12: number, arg13: number,
+        arg14: number, arg15: number, arg16: number, arg17: number, textureId: number
+    ): void {
+        const var33 = arg9 - arg10;
+        const var34 = arg12 - arg13;
+        const var35 = arg15 - arg16;
+        const var36 = arg11 - arg9;
+        const var37 = arg14 - arg12;
+        const var38 = arg17 - arg15;
+        const fscale = Pix3D.focal !== 512 ? 512 / Pix3D.focal : 1;
+        const f1c = (var36 * arg12 - var37 * arg9) * 16384;
+        const f1x = ((var37 * arg15 - var38 * arg12) * 256 * fscale) / 8;
+        const f1y = (var38 * arg9 - var36 * arg15) * 32 * fscale;
+        const f2c = (var33 * arg12 - var34 * arg9) * 16384;
+        const f2x = ((var34 * arg15 - var35 * arg12) * 256 * fscale) / 8;
+        const f2y = (var35 * arg9 - var33 * arg15) * 32 * fscale;
+        const f3c = (var34 * var36 - var33 * var37) * 16384;
+        const f3x = ((var35 * var37 - var34 * var38) * 256 * fscale) / 8;
+        const f3y = (var33 * var38 - var35 * var36) * 32 * fscale;
+        // the plane functions are evaluated CENTRE-relative (textureRaster: var74 = x - originX;
+        // var52 = y - originY), ratio already 0..1 per tile
+        const dx0 = x0 - Pix3D.originX;
+        const dy0 = y0 - Pix3D.originY;
+        const dx1 = x1 - Pix3D.originX;
+        const dy1 = y1 - Pix3D.originY;
+        const dx2 = x2 - Pix3D.originX;
+        const dy2 = y2 - Pix3D.originY;
+        const ok = GlRenderer.pushTexturedTriangle(
+            textureId,
+            x0, y0, l0, f1c + f1x * dx0 + f1y * dy0, f2c + f2x * dx0 + f2y * dy0, f3c + f3x * dx0 + f3y * dy0,
+            x1, y1, l1, f1c + f1x * dx1 + f1y * dy1, f2c + f2x * dx1 + f2y * dy1, f3c + f3x * dx1 + f3y * dy1,
+            x2, y2, l2, f1c + f1x * dx2 + f1y * dy2, f2c + f2x * dx2 + f2y * dy2, f3c + f3x * dx2 + f3y * dy2,
+            // 464 parity, same rule the software mapper follows: the TEXTURED path ignores face
+            // alpha entirely (the body above never reads Pix3D.trans — only Pix3D.opaque, per
+            // texel). Transparency on a textured face comes from the texture's colour key, not
+            // from faceAlpha. Feeding trans in here drew every alpha'd canopy face translucent,
+            // and with painter's order and no depth buffer the overlapping leaf quads blended
+            // into each other so each triangle's outline showed through the tree.
+            1
+        );
+        if (!ok) {
+            const avg = Pix3D.textureManager!.getAverageRgb(textureId);
+            Pix3D.gouraudTriangle(y0, y1, y2, x0, x1, x2, Pix3D.textureLightColour(avg, l0), Pix3D.textureLightColour(avg, l1), Pix3D.textureLightColour(avg, l2));
+        }
+    }
+
     static textureLightColour(arg0: number, arg1: number): number {
         let var2 = (arg1 * (arg0 & 0x7f)) >> 7;
         if (var2 < 2) {

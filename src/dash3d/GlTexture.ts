@@ -32,6 +32,9 @@ export default class GlTexture extends Linkable2 {
     readonly scrollYSpeed: number;
     brightness: number = 0;
     texels: Int32Array | null = null;
+    // Baked edge length of `texels` (64 or 128). animate() swaps `texels` with a shared grow-only
+    // buffer, so texels.length can exceed size*size — never infer the size from the length.
+    texelSize: number = 0;
 
     constructor(arg0: Packet) {
         super();
@@ -85,6 +88,7 @@ export default class GlTexture extends Linkable2 {
                 return null;
             }
             this.texels = this.render(arg1, arg3 ? 64 : 128, arg2);
+            this.texelSize = arg3 ? 64 : 128;
             this.brightness = arg1;
         }
         return this.texels;
@@ -151,6 +155,12 @@ export default class GlTexture extends Linkable2 {
                 return null;
             }
         }
+        // 464 bake parity (Class4_Sub19.method313 tail): quantize the base bank. Post-gamma
+        // texels with r<=7, g<=7, b==0 collapse to 0 = the colour key, eroding the darkest
+        // cut-out fringe to transparency exactly like the Java client.
+        for (let i = 0; i < out.length; i++) {
+            out[i] &= 0xf8f8ff;
+        }
         return out;
     }
 
@@ -171,10 +181,10 @@ export default class GlTexture extends Linkable2 {
         if (GlTexture.animationBuffer === null || GlTexture.animationBuffer.length < this.texels.length) {
             GlTexture.animationBuffer = new Int32Array(this.texels.length);
         }
-        const var2 = this.texels.length;
+        const var5 = this.texelSize;
+        const var2 = var5 * var5;
         const var3 = this.scrollXSpeed * arg0;
         const var4 = var2 - 1;
-        const var5 = this.texels.length === 4096 ? 64 : 128;
         const var6 = var5 * arg0 * this.scrollYSpeed;
         const var7 = var5 - 1;
         for (let var8 = 0; var8 < var2; var8 += var5) {

@@ -41,7 +41,25 @@ export default class JagString {
             }
         }
         var5.compact();
-        return var5.intern(-35)!;
+        // Deliberately NOT interned. intern() adds every string to a static HashTable that is
+        // never pruned, and wrap() is called on runtime-generated text in hot paths — menu /
+        // tooltip strings rebuilt on mouse move (Client.getMenuText) and every clientscript
+        // string-concat opcode (ScriptRunner). A heap snapshot of a degraded session showed
+        // 244,946 interned StringNodes vs 66,265 in a fresh one, i.e. +178,549 permanently
+        // retained JagStrings with their Int8Array buffers, bigint keys and closures.
+        //
+        // It cost frame time as well as memory: the table is a fixed HashTable(4096) that never
+        // resizes, so 244k entries meant ~236 per bucket, and intern() LINEARLY SCANS its bucket
+        // on every call — the client got progressively slower the longer a session ran, and a
+        // hard reload "fixed" it. Nothing compares JagStrings by identity (strEquals and
+        // compareSorted are content-based) and intern() had no other caller, so dropping the
+        // sharing is unobservable.
+        //
+        // mutable=false is kept because intern() used to set it: it is what makes strEquals take
+        // its cachedHash fast path, and what makes appendChar/append/compact throw on a wrapped
+        // string. Preserving it keeps wrap()'s contract byte-for-byte identical.
+        var5.mutable = false;
+        return var5;
     }
 
     static join(arg0: JagString[]): JagString {

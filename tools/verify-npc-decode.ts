@@ -18,17 +18,34 @@ let resolveIdle: (() => void) | null = null;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 const sock = net.connect(PORT, HOST);
 sock.setNoDelay(true);
-const killer = setTimeout(() => { console.log('[verify] TIMEOUT'); process.exit(2); }, 15000);
-sock.on('error', e => { console.log('[verify] socket error:', (e as Error).message); process.exit(3); });
+const killer = setTimeout(() => {
+    console.log('[verify] TIMEOUT');
+    process.exit(2);
+}, 15000);
+sock.on('error', e => {
+    console.log('[verify] socket error:', (e as Error).message);
+    process.exit(3);
+});
 sock.on('data', d => {
     buf = Buffer.concat([buf, d]);
     if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { const r = resolveIdle; resolveIdle = null; if (r) r(); }, 250);
+    idleTimer = setTimeout(() => {
+        const r = resolveIdle;
+        resolveIdle = null;
+        if (r) r();
+    }, 250);
 });
-function waitIdle(): Promise<void> { return new Promise(res => { resolveIdle = res; }); }
+function waitIdle(): Promise<void> {
+    return new Promise(res => {
+        resolveIdle = res;
+    });
+}
 function deblock(wire: Buffer): Buffer {
     const out: number[] = [];
-    for (let i = 0; i < wire.length; i++) { if (i > 0 && i % 512 === 0) continue; out.push(wire[i]); }
+    for (let i = 0; i < wire.length; i++) {
+        if (i > 0 && i % 512 === 0) continue;
+        out.push(wire[i]);
+    }
     return Buffer.from(out);
 }
 async function fetchContainer(cacheId: number, fileId: number): Promise<Buffer> {
@@ -52,11 +69,19 @@ function splitGroup(data: Buffer, numFiles: number): Buffer[] {
     let p = data.length - 1 - numChunks * numFiles * 4;
     for (let c = 0; c < numChunks; c++) {
         let size = 0;
-        for (let f = 0; f < numFiles; f++) { size += data.readInt32BE(p); p += 4; chunkSizes[c][f] = size; }
+        for (let f = 0; f < numFiles; f++) {
+            size += data.readInt32BE(p);
+            p += 4;
+            chunkSizes[c][f] = size;
+        }
     }
     const files: Buffer[] = new Array(numFiles).fill(null).map(() => Buffer.alloc(0));
     let off = 0;
-    for (let c = 0; c < numChunks; c++) for (let f = 0; f < numFiles; f++) { files[f] = Buffer.concat([files[f], data.subarray(off, off + chunkSizes[c][f])]); off += chunkSizes[c][f]; }
+    for (let c = 0; c < numChunks; c++)
+        for (let f = 0; f < numFiles; f++) {
+            files[f] = Buffer.concat([files[f], data.subarray(off, off + chunkSizes[c][f])]);
+            off += chunkSizes[c][f];
+        }
     return files;
 }
 function fileIdLimitFor(container: Buffer, wantGroup: number): number {
@@ -64,11 +89,23 @@ function fileIdLimitFor(container: Buffer, wantGroup: number): number {
     let pos = 0;
     const g1 = () => d[pos++] & 0xff;
     const g2 = () => ((d[pos++] & 0xff) << 8) | (d[pos++] & 0xff);
-    const g4 = () => { const v = d.readInt32BE(pos); pos += 4; return v; };
-    const proto = g1(); if (proto >= 6) g4();
-    const flags = g1(); const size = g2();
-    const groupIds: number[] = []; let acc = 0; let maxGroup = -1;
-    for (let i = 0; i < size; i++) { acc += g2(); groupIds.push(acc); if (acc > maxGroup) maxGroup = acc; }
+    const g4 = () => {
+        const v = d.readInt32BE(pos);
+        pos += 4;
+        return v;
+    };
+    const proto = g1();
+    if (proto >= 6) g4();
+    const flags = g1();
+    const size = g2();
+    const groupIds: number[] = [];
+    let acc = 0;
+    let maxGroup = -1;
+    for (let i = 0; i < size; i++) {
+        acc += g2();
+        groupIds.push(acc);
+        if (acc > maxGroup) maxGroup = acc;
+    }
     if (flags & 1) for (let i = 0; i < size; i++) g4();
     for (let i = 0; i < size; i++) g4();
     for (let i = 0; i < size; i++) g4();
@@ -76,53 +113,91 @@ function fileIdLimitFor(container: Buffer, wantGroup: number): number {
     for (let i = 0; i < size; i++) groupSizes[groupIds[i]] = g2();
     const fileIdLimit: number[] = new Array(maxGroup + 1).fill(0);
     for (let i = 0; i < size; i++) {
-        const gid = groupIds[i]; let facc = 0; let fmax = -1;
-        for (let f = 0; f < groupSizes[gid]; f++) { facc += g2(); if (facc > fmax) fmax = facc; }
+        const gid = groupIds[i];
+        let facc = 0;
+        let fmax = -1;
+        for (let f = 0; f < groupSizes[gid]; f++) {
+            facc += g2();
+            if (facc > fmax) fmax = facc;
+        }
         fileIdLimit[gid] = fmax + 1;
     }
     return fileIdLimit[wantGroup] ?? 0;
 }
 // Decode an NPC-as-LocType. Handles exactly the opcodes the server writes (mirrors the client fix).
 function decodeNpc(d: Buffer): { name: string; models: number[]; size: number; idle: number } | null {
-    let pos = 0; let name = ''; let models: number[] = []; let size = 1; let idle = -1;
+    let pos = 0;
+    let name = '';
+    let models: number[] = [];
+    let size = 1;
+    let idle = -1;
     const g1 = () => d[pos++] & 0xff;
     const g2 = () => ((d[pos++] & 0xff) << 8) | (d[pos++] & 0xff);
-    const str = () => { let s = ''; while (d[pos] !== 0) s += String.fromCharCode(d[pos++]); pos++; return s; };
+    const str = () => {
+        let s = '';
+        while (d[pos] !== 0) s += String.fromCharCode(d[pos++]);
+        pos++;
+        return s;
+    };
     try {
         while (pos < d.length) {
-            const code = g1(); if (code === 0) break;
-            if (code === 5) { const n = g1(); for (let i = 0; i < n; i++) models.push(g2()); }
-            else if (code === 2) name = str();
+            const code = g1();
+            if (code === 0) break;
+            if (code === 5) {
+                const n = g1();
+                for (let i = 0; i < n; i++) models.push(g2());
+            } else if (code === 2) name = str();
             else if (code === 14) size = g1();
-            else if (code === 24) { idle = g2(); if (idle === 65535) idle = -1; }
-            else if (code === 28) pos += 1;
+            else if (code === 24) {
+                idle = g2();
+                if (idle === 65535) idle = -1;
+            } else if (code === 28) pos += 1;
             else if (code === 29) pos += 1;
             else if (code >= 30 && code < 35) str();
-            else if (code === 40) { const n = g1(); pos += n * 4; }
-            else if (code === 64 || code === 73) { /* no data */ }
-            else if (code === 65 || code === 66 || code === 68) pos += 2;
-            else if (code === 79) { pos += 2 + 2 + 1; const n = g1(); pos += n * 2; }
-            else if (code === 80) pos += 12;
+            else if (code === 40) {
+                const n = g1();
+                pos += n * 4;
+            } else if (code === 64 || code === 73) {
+                /* no data */
+            } else if (code === 65 || code === 66 || code === 68) pos += 2;
+            else if (code === 79) {
+                pos += 2 + 2 + 1;
+                const n = g1();
+                pos += n * 2;
+            } else if (code === 80) pos += 12;
             else return null; // unexpected opcode -> mis-decode
         }
-    } catch { return null; }
+    } catch {
+        return null;
+    }
     return { name, models, size, idle };
 }
 
 sock.on('connect', async () => {
-    const hs = Buffer.alloc(5); hs[0] = 15; hs.writeInt32BE(VERSION, 1); sock.write(hs);
+    const hs = Buffer.alloc(5);
+    hs[0] = 15;
+    hs.writeInt32BE(VERSION, 1);
+    sock.write(hs);
     await waitIdle();
-    if (buf[0] !== 0) { console.log(`[verify] handshake rejected (${buf[0]})`); process.exit(1); }
+    if (buf[0] !== 0) {
+        console.log(`[verify] handshake rejected (${buf[0]})`);
+        process.exit(1);
+    }
     buf = buf.subarray(1);
     console.log('[verify] JS5 OK; fetching config ref-table (255:2)...');
     const nFiles = fileIdLimitFor(await fetchContainer(255, CONFIG_ARCHIVE), NPC_GROUP);
     console.log(`[verify] config group 7 (NPCs-as-LocType) has ${nFiles} entries. Decoding a sample:`);
     const files = splitGroup(decompress(await fetchContainer(CONFIG_ARCHIVE, NPC_GROUP)), nFiles);
-    let ok = 0; let shown = 0;
+    let ok = 0;
+    let shown = 0;
     for (let f = 0; f < files.length && shown < 14; f++) {
         if (files[f].length === 0) continue;
         const dec = decodeNpc(files[f]);
-        if (dec === null) { console.log(`  npc ${f}: DECODE FAILED (unexpected opcode / overrun)`); shown++; continue; }
+        if (dec === null) {
+            console.log(`  npc ${f}: DECODE FAILED (unexpected opcode / overrun)`);
+            shown++;
+            continue;
+        }
         if (dec.models.length === 0) continue; // skip empty defs
         shown++;
         const sane = dec.models.every(m => m >= 0 && m < 100000) && dec.size >= 1 && dec.size < 16;
@@ -130,5 +205,7 @@ sock.on('connect', async () => {
         console.log(`  npc ${String(f).padStart(4)}: "${dec.name}" models=[${dec.models.join(',')}] size=${dec.size} idle=${dec.idle} ${sane ? '✓' : '✗'}`);
     }
     console.log(`\n[verify] ${ok}/${shown} sampled NPCs decode sane (valid model ids + size + name) with the NEW (LocType) format.`);
-    clearTimeout(killer); sock.end(); process.exit(0);
+    clearTimeout(killer);
+    sock.end();
+    process.exit(0);
 });

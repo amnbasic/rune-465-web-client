@@ -1,4 +1,5 @@
 import Pix3D from '#/dash3d/Pix3D.js';
+import GlRenderer from '#/dash3d/GlRenderer.js';
 import PixMap from '#/graphics/PixMap.js';
 
 import JagException from '#/callstack/JagException.js';
@@ -75,10 +76,16 @@ export default abstract class GameShell {
 
         GameShell.canvas = canvas;
         GameShell.ctx = GameShell.canvas.getContext('2d', {
-            alpha: false
+            // alpha REQUIRED: the GPU scene renders on #glcanvas UNDERNEATH and shows through the
+            // viewport's transparent hole (PixMap.GL_TRANSPARENT).
+            alpha: true
         }) as CanvasRenderingContext2D;
         GameShell.canvas.width = GameShell.sWid;
         GameShell.canvas.height = GameShell.sHei;
+        // Size the GPU layer with the frame from the start. ScreenMode.applySize only fires on an
+        // actual size CHANGE, so at boot (already 765x503) it would never run and the GL canvas
+        // would sit at the 300x150 element default.
+        GlRenderer.resize(GameShell.sWid, GameShell.sHei);
 
         GameShell.canvas.tabIndex = -1;
         GameShell.canvas.onfocus = this.focusGained.bind(this);
@@ -93,27 +100,25 @@ export default abstract class GameShell {
     }
 
     // com.jagex.game.runetek6.client.GameShell3.checkhost
+    //
+    // ORIGINALLY an anti-embedding check: Jagex shipped this so their applet refused to run
+    // unless it had been served from a jagex.com or runescape.com page, which stopped other
+    // sites hotlinking the client. The port inherited it along with a hardcoded allowance for
+    // `localhost`, `127.0.0.1` and the `192.168.1.` subnet.
+    //
+    // That purpose does not survive the transplant. This client is served by your own proxy for
+    // your own server; there is no third-party embedding to prevent, and the check's only
+    // remaining effect was to refuse to start whenever the page was reached by any address its
+    // author had not anticipated — a Tailscale 100.x address, a tunnel hostname, a LAN on
+    // 192.168.0.x or 10.x. Every one of those is you reaching your own game.
+    //
+    // AND IT IS NOT A SECURITY CONTROL. It gates nothing on the server: it runs in the browser,
+    // after the page has already been served, and anyone who did not want it could edit it out
+    // of the bundle. What actually decides who can reach the game is the network — what the
+    // proxy binds to, the firewall, and whether anything is forwarded or tunnelled. Keeping this
+    // list short bought no safety and cost the ability to play from anywhere but home.
     public checkhost(): boolean {
-        let host = this.getDocumentBase().hostname.toLowerCase();
-        if (host === 'localhost' || host === 'jagex.com' || host.endsWith('.jagex.com')) {
-            return true;
-        } else if (host === 'runescape.com' || host.endsWith('.runescape.com')) {
-            return true;
-        } else if (host.endsWith('127.0.0.1')) {
-            return true;
-        }
-        while (host.length > 0) {
-            const code = host.charCodeAt(host.length - 1);
-            if (code < 48 || code > 57) {
-                break;
-            }
-            host = host.substring(0, host.length - 1);
-        }
-        if (host.endsWith('192.168.1.')) {
-            return true;
-        }
-        this.error('invalidhost');
-        return false;
+        return true;
     }
 
     async run() {

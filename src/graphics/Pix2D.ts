@@ -215,6 +215,128 @@ export default class Pix2D {
         }
     }
 
+    /**
+     * A filled circle, either BLENDED into the frame or written with an ALPHA TAG.
+     *
+     * Deliberately a plain bounding-box walk with a squared-radius test rather than the scanline
+     * machinery `fillCircleTrans` uses: these are ~26px discs drawn fourteen times a frame, so the
+     * arithmetic is nothing and the two write modes stay legible side by side.
+     *
+     * `tag` non-zero means write `rgb | tag` and let the BROWSER composite (see PixMap's alpha-tag
+     * note) instead of blending here. That is the distinction that makes a see-through HUD work
+     * over the GPU scene, which is not in this buffer to blend with.
+     */
+    static fillCircleBlend(cx: number, cy: number, radius: number, rgb: number, alpha: number, tag: number): void {
+        if (radius <= 0) {
+            return;
+        }
+        const inv: number = 256 - alpha;
+        const sr: number = (rgb >> 16) & 0xff;
+        const sg: number = (rgb >> 8) & 0xff;
+        const sb: number = rgb & 0xff;
+        const tagged: number = (rgb & 0xffffff) | tag;
+        let y0: number = cy - radius;
+        if (y0 < Pix2D.clipMinY) {
+            y0 = Pix2D.clipMinY;
+        }
+        let y1: number = cy + radius + 1;
+        if (y1 > Pix2D.clipMaxY) {
+            y1 = Pix2D.clipMaxY;
+        }
+        let x0: number = cx - radius;
+        if (x0 < Pix2D.clipMinX) {
+            x0 = Pix2D.clipMinX;
+        }
+        let x1: number = cx + radius + 1;
+        if (x1 > Pix2D.clipMaxX) {
+            x1 = Pix2D.clipMaxX;
+        }
+        const rr: number = radius * radius;
+        for (let y: number = y0; y < y1; y++) {
+            const dy: number = y - cy;
+            const span: number = rr - dy * dy;
+            if (span < 0) {
+                continue;
+            }
+            const row: number = y * Pix2D.width;
+            for (let x: number = x0; x < x1; x++) {
+                const dx: number = x - cx;
+                if (dx * dx > span) {
+                    continue;
+                }
+                const i: number = row + x;
+                if (tag !== 0) {
+                    Pix2D.pixels[i] = tagged;
+                } else {
+                    const d: number = Pix2D.pixels[i];
+                    Pix2D.pixels[i] = (((((d >> 16) & 0xff) * inv + sr * alpha) >> 8) << 16) | (((((d >> 8) & 0xff) * inv + sg * alpha) >> 8) << 8) | ((((d & 0xff) * inv + sb * alpha) >> 8) & 0xff);
+                }
+            }
+        }
+    }
+
+    /**
+     * A rounded rectangle, blended or alpha-tagged exactly like `fillCircleBlend`.
+     *
+     * The corner inset per row is the circle's own half-width at that height,
+     * `radius - sqrt(radius^2 - dy^2)`, so the corners are true quarter-circles rather than a
+     * chamfer. Rows outside the corner zone have `dy <= 0` and take the fast path.
+     */
+    static fillRoundedBlend(x: number, y: number, w: number, h: number, radius: number, rgb: number, alpha: number, tag: number, rgbBottom: number = -1): void {
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        const r: number = Math.max(0, Math.min(radius, Math.min(w, h) >> 1));
+        const inv: number = 256 - alpha;
+        // A vertical gradient when rgbBottom is given, resolved once per ROW rather than per pixel.
+        // Flat fills read as cut-out rectangles; a few shades from top to bottom is what makes a
+        // panel look lit, and it costs one lerp per scanline.
+        const gradient: boolean = rgbBottom >= 0;
+        const tr: number = (rgb >> 16) & 0xff;
+        const tg: number = (rgb >> 8) & 0xff;
+        const tb: number = rgb & 0xff;
+        const br: number = gradient ? (rgbBottom >> 16) & 0xff : tr;
+        const bg: number = gradient ? (rgbBottom >> 8) & 0xff : tg;
+        const bb: number = gradient ? rgbBottom & 0xff : tb;
+        let sr: number = tr;
+        let sg: number = tg;
+        let sb: number = tb;
+        let tagged: number = (rgb & 0xffffff) | tag;
+        const span: number = h > 1 ? h - 1 : 1;
+        for (let row: number = 0; row < h; row++) {
+            if (gradient) {
+                sr = (tr + ((br - tr) * row) / span) | 0;
+                sg = (tg + ((bg - tg) * row) / span) | 0;
+                sb = (tb + ((bb - tb) * row) / span) | 0;
+                tagged = (sr << 16) | (sg << 8) | sb | tag;
+            }
+            const py: number = y + row;
+            if (py < Pix2D.clipMinY || py >= Pix2D.clipMaxY) {
+                continue;
+            }
+            const dy: number = Math.max(r - row, r - (h - 1 - row));
+            const inset: number = dy > 0 ? r - ((Math.sqrt(r * r - (r - dy) * (r - dy)) + 0.5) | 0) : 0;
+            let x0: number = x + inset;
+            if (x0 < Pix2D.clipMinX) {
+                x0 = Pix2D.clipMinX;
+            }
+            let x1: number = x + w - inset;
+            if (x1 > Pix2D.clipMaxX) {
+                x1 = Pix2D.clipMaxX;
+            }
+            const base: number = py * Pix2D.width;
+            for (let px: number = x0; px < x1; px++) {
+                const i: number = base + px;
+                if (tag !== 0) {
+                    Pix2D.pixels[i] = tagged;
+                } else {
+                    const d: number = Pix2D.pixels[i];
+                    Pix2D.pixels[i] = (((((d >> 16) & 0xff) * inv + sr * alpha) >> 8) << 16) | (((((d >> 8) & 0xff) * inv + sg * alpha) >> 8) << 8) | ((((d & 0xff) * inv + sb * alpha) >> 8) & 0xff);
+                }
+            }
+        }
+    }
+
     static fillCircleTrans(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number): void {
         if (arg4 === 256) {
             Pix2D.method498(arg0, arg1, arg2, arg3);

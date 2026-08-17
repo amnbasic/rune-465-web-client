@@ -1,4 +1,5 @@
 import { Client } from '#/client/Client.js';
+import ChatFilter from '#/client/ChatFilter.js';
 import ClientGosubFrame from '#/client/ClientGosubFrame.js';
 import ClientInvCache from '#/client/ClientInvCache.js';
 import ClientKeyboardListener from '#/client/ClientKeyboardListener.js';
@@ -2614,8 +2615,14 @@ export default class ScriptRunner {
                     }
                     if (opcode === 5003) {
                         // chat_gethistory_bytypeandline
+                        //
+                        // THE FIVE LINE ACCESSORS AND THE LENGTH ARE THE CHAT TABS. The cache's
+                        // chatbox walks the history through these, so mapping the index it asks
+                        // for onto the index it should get is the whole of the filter — see
+                        // ChatFilter. `All` returns the index unchanged, and a line the active tab
+                        // excludes resolves past the `< 100` guard that is already here.
                         isp--;
-                        const var185 = this.intStack[isp];
+                        const var185 = ChatFilter.line(this.intStack[isp]);
                         let var186: string | null = null;
                         if (var185 < 100) {
                             var186 = Client.chatText[var185];
@@ -2630,7 +2637,7 @@ export default class ScriptRunner {
                         // chat_gethistory_byuid
                         let var187 = -1;
                         isp--;
-                        const var188 = this.intStack[isp];
+                        const var188 = ChatFilter.line(this.intStack[isp]);
                         if (var188 < 100 && Client.chatText[var188] !== null) {
                             var187 = Client.chatType[var188];
                         }
@@ -2797,7 +2804,7 @@ export default class ScriptRunner {
                     if (opcode === 5010) {
                         // chat_sendclan
                         isp--;
-                        const var198 = this.intStack[isp];
+                        const var198 = ChatFilter.line(this.intStack[isp]);
                         let var199: string | null = null;
                         if (var198 < 100) {
                             var199 = Client.chatUsername[var198];
@@ -2811,7 +2818,7 @@ export default class ScriptRunner {
                     if (opcode === 5011) {
                         let var200: string | null = null;
                         isp--;
-                        const var201 = this.intStack[isp];
+                        const var201 = ChatFilter.line(this.intStack[isp]);
                         if (var201 < 100) {
                             var200 = Client.chatScreenName[var201];
                         }
@@ -2824,7 +2831,7 @@ export default class ScriptRunner {
                     if (opcode === 5012) {
                         let var202 = -1;
                         isp--;
-                        const var203 = this.intStack[isp];
+                        const var203 = ChatFilter.line(this.intStack[isp]);
                         if (var203 < 100) {
                             var202 = Client.field2483[var203];
                         }
@@ -2848,8 +2855,9 @@ export default class ScriptRunner {
                         continue;
                     }
                     if (opcode === 5017) {
-                        // chat_gethistorylength
-                        this.intStack[isp++] = Client.chatHistoryLength;
+                        // chat_gethistorylength — the ACTIVE TAB's length, so the chatbox lays out
+                        // only the lines it is going to be given. See ChatFilter.
+                        this.intStack[isp++] = ChatFilter.count(Client.chatHistoryLength);
                         continue;
                     }
                     if (opcode === 5050) {

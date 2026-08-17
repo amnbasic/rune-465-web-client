@@ -70,7 +70,9 @@ async function fetchGroup(cacheId: number, fileId: number, label: string): Promi
     const compType = db[3];
     const compLen = view.getUint32(4, false);
     const comp = compType === 0 ? 'none' : compType === 1 ? 'bzip2' : compType === 2 ? 'gzip' : `?${compType}`;
-    const hex = Array.from(db.subarray(3, 19)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const hex = Array.from(db.subarray(3, 19))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
     console.log(`[ws-probe] ${label} (${cacheId}:${fileId}): wire=${buf.length}B deblocked=${db.length}B hdr=[${hdrCache}:${hdrFile}] compType=${compType}(${comp}) compLen=${compLen} first16=${hex}`);
 }
 

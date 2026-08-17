@@ -10,10 +10,21 @@ import ClientInvCache from '#/client/ClientInvCache.js';
 import ClientKeyboardListener from '#/client/ClientKeyboardListener.js';
 import ClientMouseListener from '#/client/ClientMouseListener.js';
 import GameShell from '#/client/GameShell.js';
+import ChatFilter, { CHAT_CHIPS } from '#/client/ChatFilter.js';
 import HookReq from '#/client/HookReq.js';
+import HotkeyBar from '#/client/HotkeyBar.js';
+import HudSkin from '#/client/HudSkin.js';
 import MouseTracking from '#/client/MouseTracking.js';
+import MobileKeyboard from '#/client/MobileKeyboard.js';
+import * as HudStrip from '#/client/HudStrip.js';
+import MobileLayout from '#/client/MobileLayout.js';
+import type { SafeInsets } from '#/client/MobileLayout.js';
+import MobileTouch from '#/client/MobileTouch.js';
 import MouseWheelListener from '#/client/MouseWheelListener.js';
+import PixMap from '#/graphics/PixMap.js';
+import GlRenderer from '#/dash3d/GlRenderer.js';
 import PrivilegedRequest from '#/client/PrivilegedRequest.js';
+import ScreenMode from '#/client/ScreenMode.js';
 import ScriptRunner from '#/client/ScriptRunner.js';
 import Skills from '#/constants/Skills.js';
 import Text from '#/constants/Text.js';
@@ -143,6 +154,20 @@ export class Client extends GameShell {
     // the chatbox; '/' ':' ';' '?' open it and pass through. Enter (send) or Escape leaves
     // typing mode. Toggle WASD with ::wasd, the title-screen button or the control bar.
     static wasdMode: boolean = true;
+    // Display tab of the settings panel; drawn in the viewport's top-left by gameDrawMain.
+    static showFpsCounter: boolean = false;
+    // Display tab / ::grounditems; drawn over each pile by groundItemOverlays.
+    static showGroundItems: boolean = true;
+    // Display tab / ::groundmenu; collapses a pile's repeated right-click lines into "Coal x 9".
+    static groundItemMenu: boolean = true;
+    // Display tab / ::roofs. ON is the cache's own behaviour - roofs are drawn, and roofCheck
+    // hides the level above you the moment you or the camera line crosses a roof tile. OFF never
+    // draws above your own plane at all, so a building's roof is gone before you step under it.
+    static showRoofs: boolean = true;
+    // Tiles either side of the player that get a label, and the most lines one tile may draw.
+    // The scene is 104x104 but a label is unreadable long before that, and this runs per frame.
+    private static readonly GROUND_ITEM_RADIUS: number = 14;
+    private static readonly GROUND_ITEM_LINES: number = 3;
     static typingMode: boolean = false;
     // a keydown consumed by the gate is followed by its keypress char - drop that too
     private static swallowChar: boolean = false;
@@ -191,6 +216,7 @@ export class Client extends GameShell {
     private static loginStep: number = 0;
     private static loginWaitingTime: number = 0;
     private static loginFailCount: number = 0;
+    private static loginSocketRetryAt: number = 0;
     private static loginHopTimer: number = 0;
     static loginHost: string = '127.0.0.1';
     static npc: (ClientNpc | null)[] = new Array(32768).fill(null);
@@ -396,6 +422,9 @@ export class Client extends GameShell {
     static viewportX: number = 0;
     static viewportY: number = 0;
     static viewportW: number = 0;
+
+    /** Set once at startup by MobileTouch; widens menu hit targets for fingertips. */
+    static touchInput: boolean = false;
     static viewportH: number = 0;
     static hookRequests: LinkList<HookReq> = new LinkList();
     static hookRequestsTimer: LinkList<HookReq> = new LinkList();
@@ -490,7 +519,10 @@ export class Client extends GameShell {
     static userhash: bigint = 0n;
     static readonly field1098: bigint = 7162900525229798032761816791230527296329313291232324290237849263501208207972894053929065636522363163621000728841182238772712427862772219676577293600221789n;
     static readonly field515: bigint = 58778699976184461502525193738213253649000149147835990136706041084440742975821n;
-    static midiVolume: number = 255;
+    // Start silent: the title screen fires up the theme before you can reach any control. The
+    // in-game music-volume setting still drives this (see the clientVar handler), and raising it
+    // from 0 starts the current track, so this only silences boot.
+    static midiVolume: number = 0;
     static readonly MENUACTION_PLAYER: readonly number[] = [30, 58, 29, 45, 37, 16, 1, 50];
     static loginSeed: bigint = 0n;
     static stockTransmitNum: number = 0;
@@ -519,10 +551,52 @@ export class Client extends GameShell {
     static field3083: number = 320;
     static field4175: number = 256;
     static moveAction: string = Text.walkhere;
+
+    /**
+     * Menu action id for the custom admin-only "Teleport here" ground option. 1008 is the first
+     * free id: doAction dispatches 1..58 and 1001..1006, 1007 is cancel, and it has to stay below
+     * 2000 because doAction subtracts 2000 from the shift-click variants.
+     */
+    static readonly TELEPORT_HERE: number = 1008;
+    /**
+     * Whether the ground pick now in flight came from "Teleport here" rather than "Walk here".
+     * Both options resolve the tile the same way - updateMousePicking, then World.groundX/groundZ
+     * next frame - so this says which one to run when the pick lands. doAction sets it on BOTH
+     * paths (true for teleport, false for walk), so a pick that never resolves can't leave it
+     * armed and turn the next ordinary click into a teleport.
+     */
+    static teleportHereClick: boolean = false;
+
     static menuX: number = 0;
     static menuY: number = 0;
     static menuWidth: number = 0;
     static menuHeight: number = 0;
+    /**
+     * Row pitch of the OPEN menu, in frame pixels. Latched by `openMenu` rather than recomputed
+     * per use: `menuRowPitch()` reads the live presentation scale, and a frame resize between the
+     * pick pass and the draw pass would otherwise have the two disagree about where row 3 is.
+     */
+    static menuRowSize: number = 15;
+
+    /**
+     * Is the GPU renderer supplying the scene this frame?
+     *
+     * Written once per frame by `gameDrawMain` from the same expression that decides whether to
+     * punch the transparent hole, so the two can never disagree. Read by the HUD draw to choose
+     * alpha-tagging over blending. Defaults false, i.e. the software behaviour, so nothing drawn
+     * before the first scene pass can be tagged by accident.
+     */
+    static glSceneActive: boolean = false;
+
+    /**
+     * The focal the 2D overlays project with — the scene's, in frame pixels.
+     *
+     * 512 in the fixed layout, and scaled with the viewport's height in the resizable one. Written
+     * once per frame by `gameDrawMain` beside `Pix3D.focal` so the two can never disagree, which
+     * they did: overhead names and ground-item labels were hardcoded at 512 and drifted toward the
+     * screen centre on any viewport taller than the cache's 334.
+     */
+    static overlayFocal: number = 512;
     static menuParamB: Int32Array = new Int32Array(500);
     static menuParamC: Int32Array = new Int32Array(500);
     static menuAction: Int32Array = new Int32Array(500);
@@ -573,6 +647,74 @@ export class Client extends GameShell {
         World.lowMem = false;
     }
 
+    /**
+     * True only when the world gameframe is really on screen.
+     *
+     * Currently unreferenced - it existed for the removed resizable display mode, which gated every
+     * canvas resize on it. Kept because the reason it exists is easy to lose and expensive to
+     * rediscover: `toplevelinterface` ALONE is not enough. It is not cleared on every path back to
+     * the title screen, so a failed login can leave it reading 548/549 while the login art is up,
+     * which had the resizable path resizing the canvas underneath the title screen.
+     */
+    static inGamePane(): boolean {
+        // 548 = fixed game frame, 549 = welcome screen shown while already logged in
+        return Client.state === ClientMainState.GAME && (Client.toplevelinterface === 548 || Client.toplevelinterface === 549);
+    }
+
+    /**
+     * Hand the live pane to MobileLayout so it can stamp (or un-stamp) the resizable anchors.
+     *
+     * The three things it needs all live in different places on purpose — the pane id is Client's,
+     * the mode flag and the measured safe area are ScreenMode's, and the anchor table is
+     * MobileLayout's. Passing them in is what lets MobileLayout import nothing but IfType and
+     * ScreenMode import nothing from Client, which is the rule the rest of the display code keeps.
+     */
+    /**
+     * Hand the hotkey column the three things it cannot work out for itself: the presentation
+     * scale, the safe-area insets, and the cell size it SHARES with the tab strip.
+     *
+     * Three callers — the per-frame stamp, the draw and the hit test — and they go through one
+     * function rather than three copies for the reason the draw's own comment gives: the moment
+     * two of them disagree about the conversion, the cell you tap stops being the cell you see.
+     */
+    static syncHotkeyBar(): { insets: SafeInsets; strip: HudStrip.Strip } {
+        const insets: SafeInsets = ScreenMode.frameInsets();
+        const strip: HudStrip.Strip = HudStrip.geometry(GameShell.sWid, GameShell.sHei, insets, ScreenMode.frameScale);
+        HotkeyBar.scale = ScreenMode.frameScale;
+        HotkeyBar.inset = { left: insets.left, bottom: insets.bottom };
+        HotkeyBar.metrics = strip;
+        // And out to the stylesheet, so the DOM chat/cog buttons are the same size as everything
+        // else. Only on a change: this runs three times a frame and writing custom properties
+        // onto <body> invalidates style for the whole document.
+        const css: number = Math.round(strip.cell * (ScreenMode.frameScale > 0 ? ScreenMode.frameScale : 1));
+        const safe: SafeInsets = ScreenMode.safeInsets();
+        if (css !== HudSkin.cellCss || safe.left !== HudSkin.safeLeftCss || safe.bottom !== HudSkin.safeBottomCss) {
+            HudSkin.cellCss = css;
+            HudSkin.safeLeftCss = safe.left;
+            HudSkin.safeBottomCss = safe.bottom;
+            HudSkin.publishCss(globalThis.document?.body ?? null);
+        }
+        return { insets, strip };
+    }
+
+    static stampMobileLayout(): void {
+        // Whether the modal slot has anything in it. MobileLayout needs the answer for its HUD hit
+        // test and cannot ask: the answer lives in Client.subinterfaces, and that file imports
+        // nothing but IfType. com_64 is a 512x334 layer parked over the middle of the frame
+        // whether or not a bank is open, so counting it as HUD unconditionally would turn a large
+        // rectangle of world into ground where a drag does not turn the camera.
+        MobileLayout.modalOpen = Client.subinterfaces.find(BigInt((548 << 16) | 64)) !== null;
+        // Both conditions, so the layout and the surface can never disagree. Anchoring the HUD to
+        // a frame that is still 765x503 would be merely pointless; the reverse — an enlarged frame
+        // with the HUD still on cache coordinates — is the broken state this whole thing exists to
+        // remove, with the tab strip and the chat input hanging off the bottom edge.
+        // The frame's size and its presentation scale go in because the tab strip's CELL is
+        // computed from them — see HudStrip. Everything else in the table is a fixed inset the
+        // engine resolves against whatever frame it is handed, and needs neither.
+        const { insets, strip } = Client.syncHotkeyBar();
+        MobileLayout.apply(Client.toplevelinterface, ScreenMode.resizable && ScreenMode.gameFrame, insets, strip);
+    }
+
     override onKilled(): void {}
 
     override init(): void {
@@ -580,11 +722,31 @@ export class Client extends GameShell {
             return;
         }
         // Load persisted client-side preferences before the first key is ever polled, and let
-        // the DOM control bar drive Client.wasdMode.
+        // the DOM settings panel drive the client-side toggles it owns.
+        ScreenMode.onSurfaceChange = (): void => {
+            Client.redrawAllComponents();
+        };
         ControlBar.init();
+        Client.registerHotkeys();
         Client.wasdMode = ControlBar.settings.wasd;
+        Client.showFpsCounter = ControlBar.settings.fps;
+        Client.showGroundItems = ControlBar.settings.groundItems;
+        Client.groundItemMenu = ControlBar.settings.groundItemMenu;
+        Client.showRoofs = ControlBar.settings.roofs;
         ControlBar.onWasdChange = (value: boolean): void => {
             Client.wasdMode = value;
+        };
+        ControlBar.onFpsChange = (value: boolean): void => {
+            Client.showFpsCounter = value;
+        };
+        ControlBar.onGroundItemsChange = (value: boolean): void => {
+            Client.showGroundItems = value;
+        };
+        ControlBar.onGroundMenuChange = (value: boolean): void => {
+            Client.groundItemMenu = value;
+        };
+        ControlBar.onRoofsChange = (value: boolean): void => {
+            Client.showRoofs = value;
         };
         let param = this.getParameter('worldid');
         if (param !== null) {
@@ -658,6 +820,13 @@ export class Client extends GameShell {
         }
         ClientKeyboardListener.setupKeyCodeMap();
         ClientKeyboardListener.addListeners(GameShell.canvas!);
+        // Touch devices only. iOS will not raise a soft keyboard for a <canvas>, so there is
+        // no way to type on the login screen without a real input element to focus — see
+        // MobileKeyboard. On desktop this does nothing and adds no elements.
+        // MobileTouch first: it builds the button bar and registers MobileKeyboard.onOpen.
+        // MobileKeyboard contributes no button of its own — a tap on a text field raises it.
+        MobileTouch.init(GameShell.canvas!, document.getElementById('game') ?? document.body);
+        MobileKeyboard.init(document.getElementById('game') ?? document.body);
         ClientMouseListener.addListeners(GameShell.canvas!);
         Client.mouseWheel = MouseWheelListener.getProvider();
         Client.mouseWheel?.addListeners(GameShell.canvas!);
@@ -724,6 +893,22 @@ export class Client extends GameShell {
     // jag::oldscape::Client::MainRedraw
     override async mainredraw() {
         let redraw = false;
+
+        // Display: re-fit the frame to the window here, at the top of the frame and before
+        // anything has drawn. It has to sit in mainredraw rather than gameDraw because the title
+        // and login screens never reach gameDraw and they are presented the same way.
+        //
+        // gameFrame gates the RESIZABLE surface, and it is not optional. TitleScreen draws its
+        // background by striding a hardcoded 765 (TitleScreen.ts:469, 548, 556), so a wider frame
+        // shears the login art into diagonal bands. Published as a flag rather than read by
+        // ScreenMode because ScreenMode deliberately imports nothing from Client.
+        //
+        // Only 548 counts, not `inGamePane()`: that also admits 549, the welcome screen, which is
+        // a single fixed 765x503 pane and would sit in the corner of an enlarged frame with black
+        // around it. So the surface grows when the game frame itself arrives — one transition, at
+        // the moment the player clicks through to the world.
+        ScreenMode.gameFrame = Client.state === ClientMainState.GAME && Client.toplevelinterface === 548;
+        ScreenMode.tick();
 
         const loaded = MidiManager.updateLoading();
         if (loaded && Client.playingJingle && Client.midiPlayer !== null) {
@@ -1013,6 +1198,8 @@ export class Client extends GameShell {
 
             World.init();
             ClientBuild.groundh = World.groundh;
+            // World.init resets the draw distance to the cache baseline - re-apply the stored one.
+            World.setVisibilityRadius(ControlBar.settings.drawDist);
             for (let level: number = 0; level < BuildArea.LEVELS; level++) {
                 Client.collision[level] = new CollisionMap(104, 104);
             }
@@ -1415,8 +1602,18 @@ export class Client extends GameShell {
             const sprites = Client.sprites!;
             const materials = Client.materials!;
 
-            if (materials.requestFullDownload()) {
+            const materialsReady = materials.requestFullDownload();
+            // 465 has no rev-500 materials manifest, so texture defs (archive 9, group 0) must be
+            // fully downloaded before the first map build — ClientBuild bakes each textured tile's
+            // averageColour into the scene/minimap at build time, and an undownloaded def reads as
+            // 0 (black rivers/floors until the next region rebuild).
+            const texturesReady = textures.requestFullDownload();
+
+            if (materialsReady && texturesReady) {
                 const manager = new TextureManager(textures, materials, sprites, 20, Client.lowMem);
+                for (let i = 0; i < manager.averageRgb.length; i++) {
+                    manager.loadTexture(i);
+                }
                 Pix3D.setTextures(manager);
                 Pix3D.initColourTable(0.7);
 
@@ -1424,7 +1621,7 @@ export class Client extends GameShell {
                 Client.loadingStep = 110;
                 TitleScreen.loadPos = 70;
             } else {
-                TitleScreen.loadString = `${Text.mainload90}${materials.getTotalLoadProgress()}%`;
+                TitleScreen.loadString = `${Text.mainload90}${((materials.getTotalLoadProgress() + textures.getTotalLoadProgress()) / 2) | 0}%`;
                 TitleScreen.loadPos = 70;
             }
         } else if (Client.loadingStep === 110) {
@@ -1501,6 +1698,13 @@ export class Client extends GameShell {
             }
 
             if (Client.loginStep === 1) {
+                // The proxy closes the WebSocket ~1ms after accepting it when its upstream TCP
+                // connect fails (game server down), so the client usually gets close/error BEFORE
+                // open. A failed attempt must not leave a settled promise parked in loginSocketReq
+                // or step 1 waits on it forever. On failure: drop it, wait 500ms, try a fresh socket.
+                if (Client.loginSocketRetryAt > Date.now()) {
+                    return;
+                }
                 if (!Client.loginSocketReq) {
                     const token = this.loginSocketToken;
                     Client.loginSocketReq = new Promise<WebSocket>((resolve, reject): void => {
@@ -1512,6 +1716,9 @@ export class Client extends GameShell {
                         socket.addEventListener('error', (): void => {
                             reject(socket);
                         });
+                        socket.addEventListener('close', (): void => {
+                            reject(socket);
+                        });
                     })
                         .then(socket => {
                             if (token === this.loginSocketToken && (Client.state === ClientMainState.LOGIN || Client.state === ClientMainState.RECONNECT)) {
@@ -1521,13 +1728,10 @@ export class Client extends GameShell {
                             }
                         })
                         .catch(() => {
-                            if (token === this.loginSocketToken) {
-                                this.loginSocketError = true;
-                            }
+                            Client.loginSocketReq = null;
+                            Client.loginSocketRetryAt = Date.now() + 500;
                         });
-                }
-                if (this.loginSocketError) {
-                    throw new Error('login socket failed');
+                    return;
                 }
                 if (this.loginSocket) {
                     Client.stream = new ClientStream(this.loginSocket);
@@ -1561,6 +1765,15 @@ export class Client extends GameShell {
                 }
                 if (Client.stream.available() <= 0) {
                     Client.loginWaitingTime++;
+                    if (Client.stream.closed && Client.loginWaitingTime > 25) {
+                        // Peer dropped the socket (e.g. proxy's upstream TCP connect failed while
+                        // the game server was down). Don't idle on a dead connection for the full
+                        // 2000-tick budget - re-open the WebSocket on the next loop so reconnect
+                        // succeeds within a second of the server coming back.
+                        Client.loginStep = 0;
+                        Client.loginWaitingTime = 0;
+                        return;
+                    }
                     if (Client.loginWaitingTime > 2000) {
                         if (Client.loginFailCount < 1) {
                             Client.loginFailCount++;
@@ -2020,6 +2233,15 @@ export class Client extends GameShell {
                         Client.out.p1(com.parentId >> 16);
                         Client.out.p2_alt1(Client.objDragSlot);
                     }
+                } else if (Client.clickModeOption() !== -1) {
+                    // A hotkey mode is pinning a verb (Drop / Use) to the left click. Same idea as
+                    // the shift-click below, minus the shift, and checked first so holding shift
+                    // while a mode is on cannot fight it.
+                    Client.doAction(Client.clickModeOption());
+                } else if (Client.shiftMenuOption() !== -1) {
+                    // Shift-click runs the interface's bulk/drop option instead of its default, and
+                    // takes priority over the one-button-mode menu so it stays a single click.
+                    Client.doAction(Client.shiftMenuOption());
                 } else if ((Client.oneMouseButton === 1 || Client.isAddFriendOption(Client.menuNumEntries - 1)) && Client.menuNumEntries > 2) {
                     this.openMenu();
                 } else if (Client.menuNumEntries > 0) {
@@ -2049,6 +2271,11 @@ export class Client extends GameShell {
             Client.keypressKeychars[Client.keypresses] = ClientKeyboardListener.ch;
             Client.keypresses++;
         }
+
+        // The chat tabs and the hotkey row are drawn pixels with no components, so they claim
+        // their click before the interface walk gets to look at one.
+        Client.loopChatChips();
+        Client.loopHotkeyBar();
 
         // WorldMap.mapCom = null;
         if (Client.toplevelinterface !== -1) {
@@ -2104,9 +2331,22 @@ export class Client extends GameShell {
         if (World.groundX !== -1) {
             const x: number = World.groundX;
             const z: number = World.groundZ;
-            const localPlayer = Client.localPlayer!;
-            const success: boolean = Client.tryMove(0, 0, z, x, localPlayer.routeX[0], 0, 0, 0, true, 0, localPlayer.routeZ[0]);
             World.groundX = -1;
+
+            let success: boolean;
+            if (Client.teleportHereClick) {
+                Client.teleportHereClick = false;
+                // Reuse the existing admin command rather than inventing a packet: the server
+                // gates ::teleport behind Rights.ADMIN in dispatchCommand and runs the
+                // [debugproc,teleport] script, so this path picks up the same rights check,
+                // logging and teleport behaviour as typing the command by hand.
+                // World.groundX/groundZ are SCENE tile coords - the debugproc wants absolute.
+                Client.doCheat('::teleport ' + (x + Client.mapBuildBaseX) + ' ' + (z + Client.mapBuildBaseZ) + ' ' + Client.minusedlevel);
+                success = true;
+            } else {
+                const localPlayer = Client.localPlayer!;
+                success = Client.tryMove(0, 0, z, x, localPlayer.routeX[0], 0, 0, 0, true, 0, localPlayer.routeZ[0]);
+            }
 
             if (success) {
                 Client.crossX = ClientMouseListener.mouseClickX;
@@ -2270,9 +2510,27 @@ export class Client extends GameShell {
         Client.menuMouseX = -1;
         if (Client.toplevelinterface !== -1) {
             Client.componentDrawCount = 0;
+            // Stamp the resizable anchors BEFORE drawInterface, because drawInterface is what runs
+            // the layout pass (computeInterfaceLayout, for a root draw with no offsets) — so
+            // writing them here means they take effect in this same frame rather than the next.
+            Client.stampMobileLayout();
             this.drawInterface(GameShell.sHei, Client.toplevelinterface, 0, -1, 0, 0, 0, GameShell.sWid);
         }
         Pix2D.resetClipping();
+        // THE HOTKEY ROW IS DRAWN HERE, after the pane and outside every component's clip, for
+        // two reasons that both bit the first attempt.
+        //
+        // It was hosted on the tab strip's backdrop, which put it inside com_10's subtree — and
+        // `drawLayer` clips a child to its parent's box, so a row along the bottom-LEFT of the
+        // frame was being clipped to a 34x259 column on the bottom-RIGHT and drew nothing at all.
+        // Hosting it on any cluster has the same problem; the row belongs to the frame, not to a
+        // cluster. It would also have vanished with the second column, since com_10 is what the
+        // one-column setting hides.
+        //
+        // Here the clip has just been reset to the whole frame and the pane is finished, so this
+        // paints over everything including the full-frame scene — the same slot the minimenu and
+        // the FPS counter use, and for the same reason.
+        Client.drawHotkeyBar();
         Client.sortMinimenu();
         if (Client.isMenuOpen) {
             this.drawMinimenu();
@@ -2319,6 +2577,8 @@ export class Client extends GameShell {
             Client.chatText[var1] = null;
         }
         Client.chatHistoryLength = 0;
+        // The tab view indexes into the ring that was just emptied, so it has to be told.
+        ChatFilter.onMessage(Client.chatType, 0);
 
         Client.minimapFlagZ = 0;
         Client.macroMinimapZoom = ((Math.random() * 30.0) | 0) - 20;
@@ -2714,6 +2974,51 @@ export class Client extends GameShell {
             Client.addChat('WASD camera ' + (Client.wasdMode ? 'enabled' : 'disabled') + '.', 0, '');
             return;
         }
+        // available to everyone: the "Coal x 9" labels over ground piles
+        if (arg0.toLowerCase() === '::grounditems') {
+            Client.setGroundItemsMode(!Client.showGroundItems);
+            Client.addChat('Ground item names ' + (Client.showGroundItems ? 'enabled' : 'disabled') + '.', 0, '');
+            return;
+        }
+        // available to everyone: draw the level above you, or never draw it
+        if (arg0.toLowerCase() === '::roofs') {
+            Client.setRoofsMode(!Client.showRoofs);
+            Client.addChat('Roofs ' + (Client.showRoofs ? 'enabled' : 'disabled') + '.', 0, '');
+            return;
+        }
+        // available to everyone, and it is the way out of a corner: switch layout from the chatbox
+        //
+        // The settings panel is the only other route, and on a phone in the FIXED layout it opened
+        // upward from a button near the bottom of the screen with the page unable to scroll — so
+        // the top of the panel, where Layout lives, could sit off the top of the window. The panel
+        // is pinned to the viewport now and that cannot happen, but a setting whose own UI can hide
+        // it deserves a second door that needs no UI at all.
+        if (arg0.toLowerCase() === '::layout' || arg0.toLowerCase() === '::resizable') {
+            const next: boolean = !ControlBar.settings.resizable;
+            ControlBar.setResizable(next);
+            Client.addChat('Layout: ' + (next ? 'resizable' : 'fixed') + '.', 0, '');
+            return;
+        }
+        // Every number the resizable HUD is computed from, on the device it is computed on.
+        //
+        // This exists because the alternative was measuring pixels off a screenshot to work out
+        // what a phone was reporting, which is slow and gets the answer wrong by enough to matter.
+        // The insets in particular cannot be guessed: which side the notch is on decides how much
+        // of the side margin is real, and only the device knows.
+        if (arg0.toLowerCase() === '::insets' || arg0.toLowerCase() === '::hud') {
+            const raw: SafeInsets = ScreenMode.frameInsets();
+            const safe: SafeInsets = ScreenMode.safeInsets();
+            Client.addChat(`frame ${GameShell.sWid}x${GameShell.sHei} @ ${ScreenMode.frameScale.toFixed(3)}  cell ${HotkeyBar.metrics.cell}`, 0, '');
+            Client.addChat(`safe css l${safe.left} r${safe.right} t${safe.top} b${safe.bottom}  (edge margin ${ScreenMode.edgeMargin})`, 0, '');
+            Client.addChat(`safe frame l${raw.left} r${raw.right} t${raw.top} b${raw.bottom}`, 0, '');
+            return;
+        }
+        // available to everyone: one "Coal x 9" right-click line instead of nine "Coal" lines
+        if (arg0.toLowerCase() === '::groundmenu') {
+            Client.setGroundMenuMode(!Client.groundItemMenu);
+            Client.addChat('Grouped pile menu ' + (Client.groundItemMenu ? 'enabled' : 'disabled') + '.', 0, '');
+            return;
+        }
         if (Client.staffmodlevel >= 2) {
             if (arg0.toLowerCase() === '::gc') {
                 const memory = (globalThis.performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
@@ -2764,22 +3069,63 @@ export class Client extends GameShell {
         Client.out.pjstr(arg0.substring(2));
     }
 
+    /**
+     * Is this frame point on the world rather than on a HUD cluster?
+     *
+     * In the fixed layout the viewport rect answers this on its own: the cache puts the scene in a
+     * 512x334 hole and everything else is HUD by construction. In the resizable layout that stops
+     * being true — the scene IS the frame, the HUD is drawn on top of it, and the rect says
+     * "world" for every pixel including the ones under the bank. So the anchored HUD rects have to
+     * be subtracted, which is what MobileLayout.pointOverHud does.
+     *
+     * The single question behind two symptoms that looked unrelated: the wheel always zoomed the
+     * camera and never reached a scrollbar, and every touch drag was a camera turn and never
+     * scrolled a panel.
+     */
+    /**
+     * Is this frame point somewhere the player can type?
+     *
+     * The one place that knows every typable region, so `MobileTouch` can raise the soft keyboard
+     * from a tap the way RuneScape's own mobile client does, and the Keyboard button is not the
+     * only route in. Two regions, because there are exactly two:
+     *
+     *  - IN GAME, the chatbox's ENTRY LINE only — the strip next to your name. The whole chatbox
+     *    used to count, which meant reading scrollback, clicking a name or grabbing the scrollbar
+     *    all popped the keyboard open. The entry line is the part that means "I want to type".
+     *  - ON THE LOGIN SCREEN, the username/password band. `TitleScreen`'s own click handler selects
+     *    a field on `y` alone (246..261 user, 261..276 pass), so the band here is that pair widened
+     *    a little — tapping slightly off still raises the keyboard, and whichever field was already
+     *    selected takes the typing.
+     *
+     * State 10 with `loginscreen` 2 is the login form specifically, not the title menu behind it;
+     * raising a keyboard over the New-user / Existing-user buttons would just be in the way.
+     */
+    static wantsTextInput(x: number, y: number): boolean {
+        if (Client.state === 10) {
+            return TitleScreen.loginscreen === 2 && y >= 240 && y < 300;
+        }
+        return MobileLayout.pointOverChatEntry(x, y);
+    }
+
+    static pointOverScene(x: number, y: number): boolean {
+        const inViewport: boolean = x >= Client.viewportX && x < Client.viewportX + Client.viewportW && y >= Client.viewportY && y < Client.viewportY + Client.viewportH;
+        return inViewport && !MobileLayout.pointOverHud(x, y);
+    }
+
     // jag::oldscape::Client::GlFollowCamera
     static followCamera(): void {
         // QoL: mousewheel zoom while the pointer is over the 3D viewport (consumed here so
-        // interface scrollbars under other areas keep their wheel behaviour)
-        if (
-            Client.mouseWheelRotation !== 0 &&
-            ClientMouseListener.mouseX >= Client.viewportX &&
-            ClientMouseListener.mouseX < Client.viewportX + Client.viewportW &&
-            ClientMouseListener.mouseY >= Client.viewportY &&
-            ClientMouseListener.mouseY < Client.viewportY + Client.viewportH
-        ) {
-            Client.cameraZoom += Client.mouseWheelRotation * 45;
-            if (Client.cameraZoom < 300) {
-                Client.cameraZoom = 300;
-            } else if (Client.cameraZoom > 1200) {
-                Client.cameraZoom = 1200;
+        // interface scrollbars under other areas keep their wheel behaviour).
+        if (Client.mouseWheelRotation !== 0 && Client.pointOverScene(ClientMouseListener.mouseX, ClientMouseListener.mouseY)) {
+            const minimumZoom = 300;
+            const maximumZoom = 1200;
+            const zoomProgress = (Client.cameraZoom - minimumZoom) / (maximumZoom - minimumZoom);
+            const zoomIncrement = 15 + zoomProgress * (80 - 15);
+            Client.cameraZoom += Client.mouseWheelRotation * zoomIncrement;
+            if (Client.cameraZoom < minimumZoom) {
+                Client.cameraZoom = minimumZoom;
+            } else if (Client.cameraZoom > maximumZoom) {
+                Client.cameraZoom = maximumZoom;
             }
             Client.mouseWheelRotation = 0;
         }
@@ -3491,8 +3837,17 @@ export class Client extends GameShell {
             Client.camFollow(Client.orbitCameraX, Client.getAvH(Client.localPlayer!.x, Client.localPlayer!.z, Client.minusedlevel) - 50, yaw, pitch, pitch * 3 + Client.cameraZoom, height, Client.orbitCameraZ);
         }
 
+        // The top level the scene draws (World.maxLevel). Both roof checks answer the same
+        // question - "may the levels above the player be drawn?" - and answer 3 (draw everything)
+        // unless a roof tile is in the way, in which case they clamp to the player's own plane and
+        // the roof above vanishes. Roofs OFF is that clamp made unconditional: nothing above your
+        // plane is ever drawn, so no roof can ever be between the camera and you. It applies to the
+        // cinema camera too, deliberately - a cutscene that suddenly re-roofed the world would read
+        // as the setting breaking.
         let level: number;
-        if (Client.cinemaCam) {
+        if (!Client.showRoofs) {
+            level = Client.minusedlevel;
+        } else if (Client.cinemaCam) {
             level = Client.roofCheck2();
         } else {
             level = Client.roofCheck();
@@ -3531,8 +3886,50 @@ export class Client extends GameShell {
             }
         }
 
-        Pix2D.setClipping(x, y, x + width, y + height);
+        // Perf lever: at scale 2 the scene rasters into a half-size scratch buffer and is
+        // nearest-neighbour upscaled into the frame. A software raster's cost is pixel count, so
+        // this is what makes a big viewport playable; picking coords auto-map through
+        // Pix3D.minX/maxX, and everything after the bracket still draws full-res.
+        // GPU renderer: sceneScale stays 1 because the vertices submitted to GL are full-res frame
+        // pixels - GlRenderer.scale shrinks the glcanvas BACKING STORE instead, so half res still
+        // costs a quarter of the fragments there. The 2D frame keeps a TRANSPARENT hole where the
+        // GL canvas below shows through.
+        const glScene: boolean = GlRenderer.enabled && GlRenderer.ready();
+        // Published for the HUD draw, which has to know whether the scene is in the frame (blend)
+        // or on the canvas below it (tag the alpha). The scene always draws before the HUD — the
+        // ct-1337 child is inside com_62 and every HUD cluster hangs off com_71 after it — so this
+        // is current by the time anything reads it.
+        Client.glSceneActive = glScene;
+        // The skin decides blend-versus-tag off the same expression, one frame at a time, so the
+        // two can never disagree about which renderer is live. See HudSkin.glScene.
+        HudSkin.glScene = glScene;
+        const sceneScale: number = glScene ? 1 : ScreenMode.activeScale();
+        const sceneW: number = (width / sceneScale) | 0;
+        const sceneH: number = (height / sceneScale) | 0;
+        if (sceneScale !== 1) {
+            ScreenMode.bindSceneBuffer(sceneW, sceneH);
+        } else {
+            Pix2D.setClipping(x, y, x + width, y + height);
+        }
         Pix3D.setRenderClipping();
+        if (glScene) {
+            GlRenderer.resize(GameShell.sWid, GameShell.sHei);
+            GlRenderer.beginScene(x, y, width, height);
+        }
+        // Half res halves the projection focal to match the half-size scratch: without this the
+        // scene would render at the baked 512 into a buffer half the size, i.e. a 2x zoomed centre
+        // crop rather than the same view at lower detail. The 2x upscale then puts the effective
+        // focal back at 512 in FRAME pixels, which is why every overlay still projects at 512.
+        // Restored to 512 right after the scene - every UI pass depends on it.
+        // focalFor holds the vertical field of view constant: baked 512 in fixed mode, scaled by
+        // viewport height in resizable mode. Without it a full-window viewport keeps the 512
+        // focal authored for a 334px-tall pane and the extra width arrives as fisheye — which is
+        // what the earlier attempt at a resizable client looked like.
+        Pix3D.focal = Math.max(1, (ScreenMode.focalFor(height) / sceneScale) | 0);
+        // The same focal WITHOUT the half-res divide, for the 2D overlays. They project into frame
+        // pixels rather than into the scene scratch, so they want the frame-space value — and they
+        // want it from here, because this is the one expression that decides it. See getOverlayPos.
+        Client.overlayFocal = Math.max(1, ScreenMode.focalFor(height) | 0);
 
         if (ClientMouseListener.mouseX >= x && ClientMouseListener.mouseX < x + width && ClientMouseListener.mouseY >= y && ClientMouseListener.mouseY < y + height) {
             ModelLit.mouseCheck = true;
@@ -3551,12 +3948,37 @@ export class Client extends GameShell {
         }
 
         Client.doAudio();
-        Pix2D.fillRect(x, y, width, height, 0x0);
+        // GL mode: punch the transparent hole (PixMap alpha-0 sentinel) so the GL scene below
+        // shows through; software mode: classic black clear.
+        Pix2D.fillRect(Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX - Pix2D.clipMinX, Pix2D.clipMaxY - Pix2D.clipMinY, glScene ? PixMap.GL_TRANSPARENT : 0x0);
         World.renderAll(Client.camX, Client.camY, Client.camZ, Client.camPitch, Client.camYaw, level, null, null, null, null, null, null, Client.localPlayer!.x >> 7, Client.localPlayer!.z >> 7);
         Client.doAudio();
         World.removeSprites();
+        Pix3D.focal = 512;
+        if (glScene) {
+            GlRenderer.flush();
+        }
+        if (sceneScale !== 1) {
+            // back to the frame buffer, upscale the scene, re-clip to the viewport
+            GameShell.drawArea.bind();
+            ScreenMode.blitSceneBuffer(GameShell.drawArea.data, GameShell.drawArea.width, x, y, sceneScale);
+            Pix2D.setClipping(x, y, x + width, y + height);
+            // a viewport that doesn't divide evenly leaves a sliver the upscale never covers
+            if (sceneW * sceneScale < width) {
+                Pix2D.fillRect(x + sceneW * sceneScale, y, width - sceneW * sceneScale, height, 0x0);
+            }
+            if (sceneH * sceneScale < height) {
+                Pix2D.fillRect(x, y + sceneH * sceneScale, width, height - sceneH * sceneScale, 0x0);
+            }
+        }
+        if (Client.p12 !== null && Client.showFpsCounter) {
+            // Below the top-left hover-option text so the two never overlap — including after that
+            // text drops past the chat cluster, which is why the same inset is added here.
+            Client.p12.drawString('Fps: ' + GameShell.fps, x + 5, y + 45 + MobileLayout.chatClusterBottom(), 0xffff00, 0);
+        }
         Client.entityOverlays(x, y, height, width);
         Client.coordArrow(x, y, height, width);
+        Client.groundItemOverlays(x, y, height, width);
         (Pix3D.textureManager as TextureManager).runAnims(Client.worldUpdateNum);
         Client.otherOverlays(x, height, y, width);
         Client.camX = camX;
@@ -3571,7 +3993,27 @@ export class Client extends GameShell {
             Pix2D.fillRect(x, y, width, height, 0x0);
             Client.messageBox(Text.loading, false);
         }
-        if (!Client.js5Loading && !Client.isMenuOpen && x <= ClientMouseListener.mouseX && ClientMouseListener.mouseX < width + x && y <= ClientMouseListener.mouseY && ClientMouseListener.mouseY < height + y) {
+        // The scene's own menu entries — "Walk here", and everything the pick pass found under the
+        // pointer. Gated on the pointer being over the SCENE, which in this layout is not the same
+        // as being inside the viewport rect.
+        //
+        // The 465 cache has no noClickThrough byte on any if3 component (IfType.decode3), so no HUD
+        // piece blocks a click by itself. The fixed layout did not need one: the scene lived in a
+        // 512x334 hole and a click on the sidebar was simply outside it. Resizable made the
+        // viewport the whole frame, so this offered "Walk here" underneath the inventory, the tab
+        // rows and the minimap — and since the left-click default is the LAST entry added, a tap
+        // meant for an interface walked the player instead. On the minimap it was worse: the
+        // minimap's own click handler ran too, so the tap both flagged a minimap destination and
+        // walked to the world tile behind it.
+        if (
+            !Client.js5Loading &&
+            !Client.isMenuOpen &&
+            x <= ClientMouseListener.mouseX &&
+            ClientMouseListener.mouseX < width + x &&
+            y <= ClientMouseListener.mouseY &&
+            ClientMouseListener.mouseY < height + y &&
+            !MobileLayout.pointOverHud(ClientMouseListener.mouseX, ClientMouseListener.mouseY)
+        ) {
             Client.minimenuBuildSceneActions(ClientMouseListener.mouseY, x, height, width, y, ClientMouseListener.mouseX);
         }
     }
@@ -4047,6 +4489,74 @@ export class Client extends GameShell {
         }
     }
 
+    /**
+     * Floating "Coal x 9" labels over ground piles. Same call signature and projection as
+     * `coordArrow` above — `getOverlayPos` off the tile centre, plotted at the viewport origin
+     * plus projectX/projectY — so the text tracks the camera exactly like a hint arrow does.
+     *
+     * Vanilla draws at most three objs per tile and never a quantity. That reads fine for a
+     * stackable (a big stack swaps to a fatter model via `countobj`), but `obj_add` spawns ONE
+     * obj per item for a non-stackable, so a nine-coal drop is nine separate objs that all
+     * render as the same single lump. Aggregating the tile's obj list by id is the only way to
+     * see what is actually lying there.
+     */
+    static groundItemOverlays(arg0: number, arg1: number, arg2: number, arg3: number): void {
+        if (!Client.showGroundItems || Client.localPlayer === null || Client.b12 === null) {
+            return;
+        }
+
+        const centreX: number = Client.localPlayer.x >> 7;
+        const centreZ: number = Client.localPlayer.z >> 7;
+        const minX: number = Math.max(0, centreX - Client.GROUND_ITEM_RADIUS);
+        const maxX: number = Math.min(BuildArea.SIZE - 1, centreX + Client.GROUND_ITEM_RADIUS);
+        const minZ: number = Math.max(0, centreZ - Client.GROUND_ITEM_RADIUS);
+        const maxZ: number = Math.min(BuildArea.SIZE - 1, centreZ + Client.GROUND_ITEM_RADIUS);
+
+        const ids: number[] = [];
+        const counts: number[] = [];
+
+        for (let tileX: number = minX; tileX <= maxX; tileX++) {
+            for (let tileZ: number = minZ; tileZ <= maxZ; tileZ++) {
+                const objs: LinkList<ClientObjNode> | null = Client.groundObj[Client.minusedlevel][tileX][tileZ];
+                if (objs === null) {
+                    continue;
+                }
+
+                // Top of the pile first, matching the order the right-click menu lists them in.
+                ids.length = 0;
+                counts.length = 0;
+                for (let node: ClientObjNode | null = objs.tail(); node !== null; node = objs.prev()) {
+                    const at: number = ids.indexOf(node.obj.id);
+                    if (at === -1) {
+                        ids.push(node.obj.id);
+                        counts.push(node.obj.count);
+                    } else {
+                        counts[at] += node.obj.count;
+                    }
+                }
+                if (ids.length === 0) {
+                    continue;
+                }
+
+                Client.getOverlayPos(arg2 >> 1, 0, (tileX << 7) + 64, arg3 >> 1, (tileZ << 7) + 64);
+                if (Client.projectX <= -1) {
+                    continue;
+                }
+
+                let y: number = arg1 + Client.projectY - 15;
+                for (let i: number = 0; i < ids.length && i < Client.GROUND_ITEM_LINES; i++) {
+                    const name: string = ObjType.list(ids[i]).name;
+                    if (name === 'null') {
+                        continue;
+                    }
+                    // ff9040 is the colour the minimenu already gives obj names.
+                    Client.b12.centreString(counts[i] > 1 ? name + ' x ' + counts[i] : name, arg0 + Client.projectX, y, 0xff9040, 0);
+                    y -= 13;
+                }
+            }
+        }
+    }
+
     static otherOverlays(arg0: number, arg1: number, arg2: number, arg3: number): void {
         if (Client.crossMode === 1) {
             Client.cross[(Client.crossCycle / 100) | 0]!.plotSprite(Client.crossX - 8, Client.crossY - 8);
@@ -4129,8 +4639,22 @@ export class Client extends GameShell {
             Client.projectX = -1;
             Client.projectY = -1;
         } else {
-            Client.projectY = (((var16 << 9) / var17) | 0) + arg0;
-            Client.projectX = arg3 + (((var13 << 9) / var17) | 0);
+            // THE FOCAL HAS TO BE THE SCENE'S, NOT 512.
+            //
+            // This was `<< 9` — focal 512 — on the reasoning that the overlay projects into FRAME
+            // pixels and the half-res scratch is upscaled by the same factor the focal was divided
+            // by, so the two cancel. That is true, and it is not the whole story: `Pix3D.focal` is
+            // not 512 in the resizable layout. `ScreenMode.focalFor` scales it with the viewport's
+            // HEIGHT to hold vertical FOV constant, so on a 1063-tall viewport the scene is drawn
+            // at focal ~1630 while every name, hitsplat, headicon, hint arrow and ground-item
+            // label was still being placed at 512 — landing them at 512/1630 of their real offset
+            // from the centre. On screen that reads as labels drifting toward the middle, worse
+            // the further from it a thing is, which is exactly what it looked like.
+            //
+            // `Client.overlayFocal` is the frame-space focal published by gameDrawMain, i.e. the
+            // one BEFORE the half-res divide, because this projects into frame pixels.
+            Client.projectY = ((Math.imul(var16, Client.overlayFocal) / var17) | 0) + arg0;
+            Client.projectX = arg3 + ((Math.imul(var13, Client.overlayFocal) / var17) | 0);
         }
     }
 
@@ -5543,6 +6067,59 @@ export class Client extends GameShell {
                 return true;
             }
 
+            if (Client.ptype === 4001) {
+                // 464 set component model rotation + zoom (1):
+                //   [i32 ME1 componentHash][u16 shortA zoom][u16 shortA rotationX][u16 BE rotationY]
+                const mrComId: number = Client.in.g4_int1();
+                const mrZoom: number = Client.in.g2_alt2();
+                const mrXAn: number = Client.in.g2_alt2();
+                const mrYAn: number = Client.in.g2();
+                const mrCom: IfType | null = IfType.get(mrComId);
+                if (mrCom !== null) {
+                    mrCom.modelZoom = mrZoom;
+                    mrCom.modelXAn = mrXAn;
+                    mrCom.modelYAn = mrYAn;
+                    Client.componentUpdated(mrCom);
+                }
+
+                Client.ptype = -1;
+                return true;
+            }
+
+            if (Client.ptype === 4201) {
+                // 464 move component child (201): [u16 LE-shortA x][u16 LE-shortA y][i32 int2 hash]
+                const mvX: number = Client.in.g2_alt3();
+                const mvY: number = Client.in.g2_alt3();
+                const mvComId: number = Client.in.g4_alt3();
+                const mvCom: IfType | null = IfType.get(mvComId);
+                if (mvCom !== null && (mvCom.x !== mvX || mvCom.y !== mvY)) {
+                    mvCom.x = mvX;
+                    mvCom.y = mvY;
+                    Client.componentUpdated(mvCom);
+                }
+
+                Client.ptype = -1;
+                return true;
+            }
+
+            if (Client.ptype === 4083) {
+                // 464 server console message (83): [string]
+                console.log('[server] ' + Client.in.gjstr());
+
+                Client.ptype = -1;
+                return true;
+            }
+
+            if (Client.ptype === 4005) {
+                // 464 play song (5): [u16 LE songId]. playSongs() was ported from the original
+                // client but nothing ever called it — the opcode mapped to 5000 (skip), so the
+                // server's track changes were framed and thrown away and music never played.
+                Client.playSongs(Client.in.g2_alt1());
+
+                Client.ptype = -1;
+                return true;
+            }
+
             if (Client.ptype === 4114) {
                 // 464 item/obj on component (114): [i32 LE zoom-divisor][u16 BE itemId (65535=clear)][i32 LE hash]
                 const icDiv: number = Client.in.g4_alt1();
@@ -5887,7 +6464,19 @@ export class Client extends GameShell {
                     const pjFsz: number = pjSz * 128 + 64;
                     const pjFtx: number = pjTx * 128 + 64;
                     const pjFtz: number = pjTz * 128 + 64;
-                    const proj: ClientProj = new ClientProj(pjSpot, Client.minusedlevel, pjFsx, pjFsz, Client.getAvH(pjFsx, pjFsz, Client.minusedlevel) - pjStartH, pjDelay + Client.loopCycle, Client.loopCycle + pjDuration, pjPeak, pjArc, pjTarget, pjEndH);
+                    const proj: ClientProj = new ClientProj(
+                        pjSpot,
+                        Client.minusedlevel,
+                        pjFsx,
+                        pjFsz,
+                        Client.getAvH(pjFsx, pjFsz, Client.minusedlevel) - pjStartH,
+                        pjDelay + Client.loopCycle,
+                        Client.loopCycle + pjDuration,
+                        pjPeak,
+                        pjArc,
+                        pjTarget,
+                        pjEndH
+                    );
                     proj.setTarget(pjFtx, pjDelay + Client.loopCycle, Client.getAvH(pjFtx, pjFtz, Client.minusedlevel) - pjEndH, pjFtz);
                     Client.projectiles.push(new ClientProjNode(proj));
                 }
@@ -5915,6 +6504,24 @@ export class Client extends GameShell {
                         node.unlink();
                     }
                     Client.serverActive.put(key, new IntNode(amMask));
+                }
+                Client.ptype = -1;
+                return true;
+            }
+
+            if (Client.ptype === 4206) {
+                // Custom if_setgraphic (206): [i32 BE componentHash][u16 spriteId], 65535 clears.
+                // getGraphic() keys its cache off `graphic` itself, so reassigning is enough — the
+                // next draw loads the new sprite and the old one stays cached under its own key.
+                const sgComId: number = Client.in.g4();
+                let sgSprite: number = Client.in.g2();
+                if (sgSprite === 65535) {
+                    sgSprite = -1;
+                }
+                const sgCom: IfType | null = IfType.get(sgComId);
+                if (sgCom !== null && sgCom.graphic !== sgSprite) {
+                    sgCom.graphic = sgSprite;
+                    Client.componentUpdated(sgCom);
                 }
                 Client.ptype = -1;
                 return true;
@@ -5978,6 +6585,11 @@ export class Client extends GameShell {
                 const windowId: number = Client.in.g2_alt3();
                 Client.toplevelinterface = windowId;
                 Client.ifAnimReset(windowId);
+                // Stamp before the layout pass: this runs on a freshly decoded pane, whose
+                // alignment fields the decoder has just re-zeroed, and executeOnLoad below can
+                // read the resolved geometry. Without it the first layout of every pane switch is
+                // computed unanchored.
+                Client.stampMobileLayout();
                 Client.computeTopLevelInterfaceLayout();
                 ScriptRunner.executeOnLoad(windowId);
                 Client.componentDirtyArea.fill(true);
@@ -6000,6 +6612,11 @@ export class Client extends GameShell {
                 }
                 Client.toplevelinterface = interfaceId;
                 Client.ifAnimReset(interfaceId);
+                // Stamp before the layout pass: this runs on a freshly decoded pane, whose
+                // alignment fields the decoder has just re-zeroed, and executeOnLoad below can
+                // read the resolved geometry. Without it the first layout of every pane switch is
+                // computed unanchored.
+                Client.stampMobileLayout();
                 Client.computeTopLevelInterfaceLayout();
                 ScriptRunner.executeOnLoad(Client.toplevelinterface);
                 Client.componentDirtyArea.fill(true);
@@ -6151,6 +6768,28 @@ export class Client extends GameShell {
                 const interfaceId: number = Client.in.g2();
                 const mode: number = Client.in.g1();
                 const existing = Client.subinterfaces.find(BigInt(componentId));
+                // The server re-sends the walkable overlay (wilderness level, BA roles) after
+                // EVERY if_close — i.e. once per combat hit (damage_self runs if_close, and the
+                // engine's closeAllSlots re-pushes the overlay). Re-opening an interface that is
+                // already in the slot with the same mode is a no-op; the full close+reopen killed
+                // an open right-click menu, reran onLoad and redrew the frame once per hit.
+                if (existing !== null && existing.id === interfaceId && existing.type === mode) {
+                    // ...but skipping the reopen must NOT skip releasing the resume-pause latch.
+                    // openSubInterface() clears resumePauseCom; that is the ONLY thing that re-arms
+                    // a "Click here to continue" button after a click (see the buttonType === 6 gate
+                    // in addComponentMenuOptions, and the Text.pleasewait substitution in drawParent).
+                    // Two consecutive same-shaped chat pages — ~chatnpc twice in a row, or any
+                    // multi-page split where both pages have the same line count — re-open the SAME
+                    // (chatbox slot, npcchat1, modal) triple, so this early return left the latch
+                    // stuck: the button rendered "Please wait..." forever and the client stopped
+                    // sending RESUME_PAUSEBUTTON entirely, with nothing reaching the server to log.
+                    if (Client.resumePauseCom !== null) {
+                        Client.componentUpdated(Client.resumePauseCom);
+                        Client.resumePauseCom = null;
+                    }
+                    Client.ptype = -1;
+                    return true;
+                }
                 if (existing !== null) {
                     Client.closeSubInterface(existing, existing.id !== interfaceId);
                 }
@@ -7314,6 +7953,11 @@ export class Client extends GameShell {
                 if (top !== Client.toplevelinterface) {
                     Client.toplevelinterface = top;
                     Client.ifAnimReset(Client.toplevelinterface);
+                    // Stamp before the layout pass: this runs on a freshly decoded pane, whose
+                    // alignment fields the decoder has just re-zeroed, and executeOnLoad below can
+                    // read the resolved geometry. Without it the first layout of every pane switch
+                    // is computed unanchored.
+                    Client.stampMobileLayout();
                     Client.computeTopLevelInterfaceLayout();
                     ScriptRunner.executeOnLoad(Client.toplevelinterface);
                     Client.componentDirtyArea.fill(true);
@@ -8734,10 +9378,39 @@ export class Client extends GameShell {
         Client.ifButtonX(1, '', -1, entry.com);
     }
 
+    /**
+     * The reverse of ControlBar.TABS: a packed component id back to its side-tab index, or -1 for
+     * anything that is not a side-tab icon. Linear over 13 entries, on the button path only.
+     */
+    static tabForComponent(com: number): number {
+        for (let i: number = 0; i < TABS.length; i++) {
+            if (TABS[i].com === com) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     /** Single entry point for WASD toggling, so the cheat, the title button and the bar agree. */
     static setWasdMode(enabled: boolean): void {
         Client.wasdMode = enabled;
         ControlBar.setWasd(enabled);
+    }
+
+    static setGroundItemsMode(enabled: boolean): void {
+        Client.showGroundItems = enabled;
+        ControlBar.setGroundItems(enabled);
+    }
+
+    /** Both halves of the roofs setting: the field gameDrawMain reads, and the stored preference. */
+    static setRoofsMode(enabled: boolean): void {
+        Client.showRoofs = enabled;
+        ControlBar.setRoofs(enabled);
+    }
+
+    static setGroundMenuMode(enabled: boolean): void {
+        Client.groundItemMenu = enabled;
+        ControlBar.setGroundMenu(enabled);
     }
 
     // jag::oldscape::minimenu::Minimenu::GameLoop
@@ -8759,9 +9432,28 @@ export class Client extends GameShell {
 
                 let option: number = -1;
                 for (let i: number = 0; i < Client.menuNumEntries; i++) {
-                    const optionY: number = menuY + (Client.menuNumEntries - 1 - i) * 15 + 31;
-                    if (clickX > menuX && clickX < menuX + menuWidth && clickY > optionY - 13 && clickY < optionY + 3) {
+                    const rowTop: number = Client.menuRowTop(i);
+                    if (clickX > menuX && clickX < menuX + menuWidth && clickY > rowTop && clickY < rowTop + Client.menuRowSize + 1) {
                         option = i;
+                    }
+                }
+
+                // TOUCH ASSIST. Even at the enlarged pitch a fingertip is wider than a row, so if
+                // the tap landed inside the menu but between two rows, take the nearest one rather
+                // than dropping it. Only ever chooses among rows that already exist, so it cannot
+                // invent an action; it just stops near-misses closing the menu for nothing.
+                if (option === -1 && Client.touchInput && Client.menuNumEntries > 0) {
+                    if (clickX > menuX - 8 && clickX < menuX + menuWidth + 8 && clickY > menuY && clickY < menuY + Client.menuHeight + 8) {
+                        let best: number = -1;
+                        let bestDistance: number = 0;
+                        for (let i: number = 0; i < Client.menuNumEntries; i++) {
+                            const distance: number = Math.abs(clickY - (Client.menuRowTop(i) + (Client.menuRowSize >> 1)));
+                            if (best === -1 || distance < bestDistance) {
+                                best = i;
+                                bestDistance = distance;
+                            }
+                        }
+                        option = best;
                     }
                 }
 
@@ -8804,6 +9496,14 @@ export class Client extends GameShell {
                         return;
                     }
                 }
+            }
+
+            // Shift-click runs the interface's bulk/drop option instead of its default. Checked
+            // before the one-button-mode promotion below, or that would open the menu instead.
+            const shiftOption: number = button === 1 ? Client.shiftMenuOption() : -1;
+            if (shiftOption !== -1) {
+                Client.doAction(shiftOption);
+                return;
             }
 
             if (button === 1 && ((Client.oneMouseButton === 1 && Client.menuNumEntries > 2) || Client.isAddFriendOption(Client.menuNumEntries - 1))) {
@@ -8856,6 +9556,40 @@ export class Client extends GameShell {
         }
     }
 
+    /**
+     * Row pitch for the NEXT menu opened, in frame pixels.
+     *
+     * The cache's pitch is 15, and 15 frame pixels is not a fixed amount of glass: the resizable
+     * layout presents a frame that is BIGGER than the window (a phone runs about 1152x531 inside
+     * an 852x393 viewport), so the cache row lands at roughly 11pt against a 44pt touch guideline.
+     * `menuRows` is therefore a target in CSS pixels and the live presentation scale divides it,
+     * which keeps a row the same PHYSICAL height whatever the frame is doing.
+     *
+     * 15 is the floor and the cache preset short-circuits, so the desktop path is bit-for-bit the
+     * behaviour it always had. The font does not grow with the row — the 465 cache has nothing
+     * bigger than b12 to grow it into — so the text sits in a taller row rather than scaling.
+     */
+    static menuRowPitch(): number {
+        const target: number = ControlBar.settings.menuRows;
+        if (target <= 15) {
+            return 15;
+        }
+        const scale: number = ScreenMode.frameScale > 0 ? ScreenMode.frameScale : 1;
+        return Math.max(15, Math.min(64, Math.round(target / scale)));
+    }
+
+    /**
+     * Top edge of menu row `i`, in frame pixels. The cache lays rows out bottom-up from the last
+     * entry, 18px below the menu's top (its 16px "Choose option" bar plus the border).
+     *
+     * The five sites that used to spell `menuY + (n - 1 - i) * 15 + 31` inline are all this plus
+     * the baseline offset, and they have to agree exactly or a tap lands on the row above the one
+     * it highlighted.
+     */
+    static menuRowTop(i: number): number {
+        return Client.menuY + (Client.menuNumEntries - 1 - i) * Client.menuRowSize + 18;
+    }
+
     drawMinimenu(): void {
         const x: number = Client.menuX;
         const y: number = Client.menuY;
@@ -8873,14 +9607,17 @@ export class Client extends GameShell {
         const mouseY: number = ClientMouseListener.mouseY;
 
         for (let i: number = 0; i < Client.menuNumEntries; i++) {
-            const optionY: number = y + (Client.menuNumEntries - 1 - i) * 15 + 31;
+            const rowTop: number = Client.menuRowTop(i);
 
             let rgb: number = 0xffffff;
-            if (mouseX > x && mouseX < x + w && mouseY > optionY - 13 && mouseY < optionY + 3) {
+            if (mouseX > x && mouseX < x + w && mouseY > rowTop && mouseY < rowTop + Client.menuRowSize + 1) {
                 rgb = 0xffff00;
             }
 
-            Client.b12!.drawString(Client.getLine(i), x + 3, optionY, rgb, 0);
+            // The baseline sits `pitch - 2` down the row, which is the cache's +13 at pitch 15.
+            // Rows taller than the font therefore grow DOWNWARD from the text, keeping the first
+            // row tight under the "Choose option" bar rather than floating in the middle of it.
+            Client.b12!.drawString(Client.getLine(i), x + 3, rowTop + Client.menuRowSize - 2, rgb, 0);
         }
         Client.blitArea(Client.menuX, Client.menuHeight, Client.menuWidth, Client.menuY);
     }
@@ -8897,15 +9634,47 @@ export class Client extends GameShell {
         } else if (Client.targetMode && Client.menuNumEntries < 2) {
             var2 = Client.targetVerb! + Text.miniseperator + Client.targetOp! + ' ->';
         } else {
-            var2 = Client.getLine(Client.menuNumEntries - 1);
+            // Mirror the shift-click override, so the hover text names the option a click would
+            // actually run. Without this it keeps advertising the ordinary default while Shift is
+            // held and the click does something else.
+            const shiftOption: number = Client.shiftMenuOption();
+            var2 = Client.getLine(shiftOption !== -1 ? shiftOption : Client.menuNumEntries - 1);
         }
 
         if (Client.menuNumEntries > 2) {
             var2 = var2 + '<col=ffffff> / ' + (Client.menuNumEntries - 2) + Text.moreoptions;
         }
 
-        const var3: number = Client.b12!.drawStringAntiMacro(var2, arg1 + 4, arg0 + 15, Client.feedbackRand, Client.feedbackSeed);
-        Client.dirtyArea(15, var3 + Client.b12!.stringWid(var2), arg0, arg1 + 4);
+        // DROPPED BELOW THE CHAT CLUSTER, because the corner it has always used is no longer empty.
+        //
+        // This text is pinned to the VIEWPORT's top-left. In the fixed frame that is a corner of
+        // world — the scene sits in a 512x334 hole with the chat underneath it — so the two could
+        // never meet. Here the viewport IS the frame and the chat cluster is in that corner, so
+        // "Talk-to Hans" was being written across the chat.
+        //
+        // OSRS mobile has no answer to copy: it has no pointer, so it has no hover text at all,
+        // and OSRS desktop's resizable mode keeps its chat at the BOTTOM left, which frees the top
+        // corner the same way the fixed frame does. Moving the text is the smaller change than
+        // moving the chat, and it costs nothing when the chatbox is collapsed — the inset goes to
+        // zero and the text springs back to the top.
+        const top: number = arg0 + MobileLayout.chatClusterBottom();
+        // AND INDENTED PAST THE HOTKEY COLUMN, for the same reason and on the other axis.
+        //
+        // Dropping the text below the chat put it exactly where the hotkeys are on a phone: the
+        // column grows upward from the bottom and the chat hangs down from the top, and on a
+        // ~430-tall frame they meet in the middle. The text is drawn AFTER the column, so it won a
+        // fight it should not have been in — "Walk here / 1 more options" written across LOOT.
+        //
+        // Only when they would actually collide, which is why this is a test and not a constant:
+        // on any frame tall enough the column is far below the text and the indent would be an
+        // unexplained margin. `bounds` is null when no slots are registered.
+        let left: number = arg1 + 4;
+        const column = HotkeyBar.bounds(GameShell.sWid, GameShell.sHei);
+        if (column !== null && MobileLayout.cropped() && top < column.y + column.h && top + 15 > column.y) {
+            left = Math.max(left, column.x + column.w + 4);
+        }
+        const var3: number = Client.b12!.drawStringAntiMacro(var2, left, top + 15, Client.feedbackRand, Client.feedbackSeed);
+        Client.dirtyArea(15, var3 + Client.b12!.stringWid(var2), top, left);
     }
 
     // jag::oldscape::minimenu::Minimenu::Open
@@ -8920,11 +9689,14 @@ export class Client extends GameShell {
         }
         width += 8;
 
-        const height: number = Client.menuNumEntries * 15 + 21;
+        // Latched for the lifetime of this menu — see the note on menuRowSize.
+        Client.menuRowSize = Client.menuRowPitch();
+
+        const height: number = Client.menuNumEntries * Client.menuRowSize + 21;
 
         Client.menuWidth = width;
         Client.isMenuOpen = true;
-        Client.menuHeight = Client.menuNumEntries * 15 + 22;
+        Client.menuHeight = Client.menuNumEntries * Client.menuRowSize + 22;
 
         let y: number = ClientMouseListener.mouseClickY;
         if (height + y > GameShell.sHei) {
@@ -8957,6 +9729,69 @@ export class Client extends GameShell {
     }
 
     // jag::oldscape::Client::DoAction
+    /** Client keycode for Shift (KEY_CODE_MAP[16]); ctrl/run is 82 alongside it. */
+    static readonly KEY_SHIFT: number = 81;
+
+    /**
+     * Menu index that a SHIFT-click should run instead of the ordinary default (the last entry),
+     * or -1 to leave vanilla behaviour alone.
+     *
+     * The bulk option is found by matching the op names the INTERFACE ITSELF declares, not by
+     * interface id, so inventory / bank / shop / trade all fall out of one rule and a new interface
+     * needs no code here. In preference order:
+     *
+     *   1. an "-All" verb   — Deposit-All, Offer-All, Withdraw-All, Sell all ...
+     *   2. the largest quantity in a "Verb N" / "Verb-N" op — Buy 50, Deposit-10 ...
+     *      (2006-era shops top out at "Buy 50"; there is no Buy-All to find)
+     *   3. Drop             — the plain inventory case
+     *
+     * Entry 0 is always Cancel, so the scan stops above it.
+     */
+    static shiftMenuOption(): number {
+        if (!ControlBar.settings.shiftClick || !ClientKeyboardListener.keyHeld[Client.KEY_SHIFT] || Client.menuNumEntries < 2) {
+            return -1;
+        }
+        let all = -1;
+        let drop = -1;
+        let bulk = -1;
+        let bulkQty = -1;
+        for (let i = Client.menuNumEntries - 1; i > 0; i--) {
+            const raw = Client.menuVerb[i];
+            if (raw === null || raw === undefined) {
+                continue;
+            }
+            // op names can carry colour tags; compare on the plain text
+            const verb = raw.replace(/<[^>]*>/g, '').trim();
+            if (/[-\s]all$/i.test(verb)) {
+                if (all === -1) {
+                    all = i;
+                }
+                continue;
+            }
+            if (/^drop$/i.test(verb)) {
+                if (drop === -1) {
+                    drop = i;
+                }
+                continue;
+            }
+            const qty = /^[A-Za-z]+[-\s](\d+)$/.exec(verb);
+            if (qty !== null) {
+                const n = Number.parseInt(qty[1], 10);
+                if (n > bulkQty) {
+                    bulkQty = n;
+                    bulk = i;
+                }
+            }
+        }
+        if (all !== -1) {
+            return all;
+        }
+        if (bulk !== -1) {
+            return bulk;
+        }
+        return drop;
+    }
+
     static doAction(arg0: number): void {
         if (arg0 < 0) {
             return;
@@ -9283,6 +10118,13 @@ export class Client extends GameShell {
             Client.selectedItem = var1;
         }
         if (var3 === 10) {
+            Client.teleportHereClick = false;
+            World.updateMousePicking(Client.minusedlevel, var1, var2);
+        }
+        if (var3 === Client.TELEPORT_HERE) {
+            // Resolve the tile through the SAME pick the walk option uses, rather than trying to
+            // derive it here - the two can then never disagree about which tile was clicked.
+            Client.teleportHereClick = true;
             World.updateMousePicking(Client.minusedlevel, var1, var2);
         }
         if (var3 === 1004) {
@@ -9727,6 +10569,20 @@ export class Client extends GameShell {
         if (var4 === null) {
             return;
         }
+        // COLLAPSIBLE SIDEBAR. Every route to a side tab lands here — a tap on the icon comes in
+        // through the minimenu's doAction, and a hotkey through Client.openTab — so this one place
+        // catches them all and nothing new has to listen for input.
+        //
+        // It must run BEFORE the op hook below, because MobileLayout.tapTab compares the tab being
+        // asked for against the one currently showing, and the hook is what switches it.
+        //
+        // Resizable only: in the fixed frame the sidebar sits in a hole in the frame art, so
+        // hiding it would leave a rectangle of nothing rather than the world.
+        const sideTab: boolean = arg0 === 1 && ScreenMode.resizable && Client.tabForComponent(arg3) >= 0;
+        if (sideTab) {
+            MobileLayout.tapTab(arg3);
+            Client.redrawAllComponents();
+        }
         if (var4.onop !== null) {
             const var5: HookReq = new HookReq();
             var5.opindex = arg0;
@@ -9734,6 +10590,11 @@ export class Client extends GameShell {
             var5.onop = var4.onop;
             var5.opbase = arg1;
             ScriptRunner.executeScript(var5);
+        }
+        // The hook switched the panel; let MobileLayout see which one this tab actually opens.
+        // Synchronous, so the panels' hide flags are already up to date here.
+        if (sideTab) {
+            MobileLayout.noteTabShown();
         }
         let var6: boolean = true;
         if (var4.clientCode > 0) {
@@ -9804,6 +10665,15 @@ export class Client extends GameShell {
                 throw new Error();
             }
             const var11: number = (var6 + ((((var7 - var6) * (arg5 - arg1)) / arg3) | 0)) | 0;
+            // Staff QoL: jump to the clicked tile. Added BEFORE the walk option on purpose - the
+            // left-click default is the LAST entry added (menuNumEntries - 1), so appending it
+            // would make every click on open ground a teleport. This way "Walk here" stays the
+            // default and "Teleport here" sits under it in the right-click list.
+            // The client only OFFERS the option; authority is the server, which re-checks
+            // Rights.ADMIN in dispatchCommand before running [debugproc,teleport].
+            if (Client.staffmodlevel >= 2) {
+                Client.addMenuOption(var11, Text.teleporthere, Client.TELEPORT_HERE, 0, '', var10);
+            }
             Client.addMenuOption(var11, Client.moveAction, 10, 0, '', var10);
         }
 
@@ -9898,11 +10768,29 @@ export class Client extends GameShell {
                 if (var19 === 3) {
                     const var35 = Client.groundObj[Client.minusedlevel][var17][var18];
                     if (var35 !== null) {
-                        for (let var36: ClientObjNode | null = var35.tail(); var36 !== null; var36 = var35.prev()) {
-                            const var37: number = var36.obj.id;
+                        // Vanilla puts one menu line per obj node on the tile. That is fine for a
+                        // stackable, but `obj_add` spawns ONE obj per item for a non-stackable, so a
+                        // nine-coal drop buries the menu under nine identical "Take Coal" lines. With
+                        // the toggle on, entries of the same id collapse into a single "Coal x 9" -
+                        // the id sent on click is unchanged, so a Take still lifts one obj as before.
+                        // Toggle off and this pushes one entry per node with a bare name: vanilla.
+                        const objIds: number[] = [];
+                        const objCounts: number[] = [];
+                        for (let node: ClientObjNode | null = var35.tail(); node !== null; node = var35.prev()) {
+                            const at: number = Client.groundItemMenu ? objIds.indexOf(node.obj.id) : -1;
+                            if (at === -1) {
+                                objIds.push(node.obj.id);
+                                objCounts.push(node.obj.count);
+                            } else {
+                                objCounts[at] += node.obj.count;
+                            }
+                        }
+                        for (let var36: number = 0; var36 < objIds.length; var36++) {
+                            const var37: number = objIds[var36];
                             const var38: ObjType = ObjType.list(var37);
+                            const objName: string = Client.groundItemMenu && objCounts[var36] > 1 ? var38.name + ' x ' + objCounts[var36] : var38.name;
                             if (Client.useMode === 1) {
-                                Client.addMenuOption(var17, Text.use, 46, var37, Client.objSelectedName! + ' -> <col=ff9040>' + var38.name, var18);
+                                Client.addMenuOption(var17, Text.use, 46, var37, Client.objSelectedName! + ' -> <col=ff9040>' + objName, var18);
                             } else if (!Client.targetMode) {
                                 let var39 = var38.op;
                                 if (Client.showOpIndex) {
@@ -9926,14 +10814,14 @@ export class Client extends GameShell {
                                         if (var40 === 4) {
                                             var41 = 3;
                                         }
-                                        Client.addMenuOption(var17, var39[var40]!, var41, var37, '<col=ff9040>' + var38.name, var18);
+                                        Client.addMenuOption(var17, var39[var40]!, var41, var37, '<col=ff9040>' + objName, var18);
                                     } else if (var40 === 2) {
-                                        Client.addMenuOption(var17, Text.take, 41, var37, '<col=ff9040>' + var38.name, var18);
+                                        Client.addMenuOption(var17, Text.take, 41, var37, '<col=ff9040>' + objName, var18);
                                     }
                                 }
-                                Client.addMenuOption(var17, Text.examine, 1006, var37, '<col=ff9040>' + var38.name, var18);
+                                Client.addMenuOption(var17, Text.examine, 1006, var37, '<col=ff9040>' + objName, var18);
                             } else if ((Client.targetMask & 0x1) === 1) {
-                                Client.addMenuOption(var17, Client.targetVerb!, 25, var37, Client.targetOp! + ' -> <col=ff9040>' + var38.name, var18);
+                                Client.addMenuOption(var17, Client.targetVerb!, 25, var37, Client.targetOp! + ' -> <col=ff9040>' + objName, var18);
                             }
                         }
                     }
@@ -10269,6 +11157,34 @@ export class Client extends GameShell {
             if (child.renderHeight === 0 && child.height !== 0) {
                 child.renderHeight = child.height;
             }
+
+            // PORT BUG REMOVED: the hidden test used to `continue` here, above the draw-slot claim
+            // and the drawCount/drawTime stamp. Java Class9.method661:43-58 claims the slot and
+            // stamps FIRST, then wraps only the painting in `if (!isIf3 || !hidden)` - a hidden
+            // component is still accounted for, it just isn't drawn. Two things broke:
+            //   - a hidden component kept a stale drawTime forever, and componentUpdated() only
+            //     dirties when componentDrawTime === drawTime, so it silently no-oped on it.
+            //     `if_sethide(com, false)` could therefore never invalidate the pane the component
+            //     lives in, and anything cs2 revealed stayed unpainted until some other change
+            //     dirtied that pane. Most visible on the prayer tab: widget 271 shows "active" by
+            //     unhiding the sprite-155 border (com_4, com_6, ...) from clientscript 49 on varp
+            //     transmit, so toggling a prayer did nothing on screen until the mouse moved or the
+            //     prayer-points text redrew on the next drain tick.
+            //   - a hidden TOP-LEVEL component claimed no slot, so every later slot index shifted
+            //     between frames and a dirty flag could end up pointing at a different pane.
+            // The slot rect uses the pre-clientComponent(), pre-drag x/y exactly as Java does
+            // (method661:47-52 runs before both).
+            let drawSlot: number = drawSlotArg;
+            if (drawSlotArg === -1) {
+                Client.componentDrawX[Client.componentDrawCount] = x + child.renderX;
+                Client.componentDrawY[Client.componentDrawCount] = y + child.renderY;
+                Client.componentDrawWidth[Client.componentDrawCount] = child.renderWidth;
+                Client.componentDrawHeight[Client.componentDrawCount] = child.renderHeight;
+                drawSlot = Client.componentDrawCount++;
+            }
+            child.drawTime = Client.loopCycle;
+            child.drawCount = drawSlot;
+
             if (child.v3 && Client.hide(child)) {
                 continue;
             }
@@ -10279,16 +11195,6 @@ export class Client extends GameShell {
 
             let childX: number = x + child.renderX;
             let childY: number = y + child.renderY;
-            let drawSlot: number = drawSlotArg;
-            if (drawSlotArg === -1) {
-                Client.componentDrawX[Client.componentDrawCount] = childX;
-                Client.componentDrawY[Client.componentDrawCount] = childY;
-                Client.componentDrawWidth[Client.componentDrawCount] = child.renderWidth;
-                Client.componentDrawHeight[Client.componentDrawCount] = child.renderHeight;
-                drawSlot = Client.componentDrawCount++;
-            }
-            child.drawTime = Client.loopCycle;
-            child.drawCount = drawSlot;
 
             let trans: number = child.trans;
             if (Client.qaOpTest && (Client.getActive(child) !== 0 || child.type === 0) && trans > 127) {
@@ -10349,14 +11255,29 @@ export class Client extends GameShell {
                 continue;
             }
             if (child.clientCode === 1337) {
-                Client.menuMouseY = childX;
-                Client.menuMouseX = childY;
+                // This child IS the 3D viewport, and whatever rect it reports is what
+                // gameDrawMain renders into. Pane 548 puts it at 512x334; in resizable mode
+                // MobileLayout gives it widthAlignment/heightAlignment 1 so the layout pass sizes
+                // it to the whole frame, and it arrives here already correct.
+                //
+                // There used to be an `if (ScreenMode.resizable)` override here that forced the
+                // rect to the full canvas locally. It drew the right thing and blitted the wrong
+                // one: componentDrawWidth/Height are recorded from renderWidth/renderHeight one
+                // block above, so the blit list still believed the scene was 512x334 and only
+                // that much of it ever reached the canvas — the rest refreshed on the once-a-second
+                // full redraw. Sizing the component itself is what makes both agree.
+                const viewX = childX;
+                const viewY = childY;
+                const viewW = child.renderWidth;
+                const viewH = child.renderHeight;
+                Client.menuMouseY = viewX;
+                Client.menuMouseX = viewY;
                 // capture the 3D viewport rect for the mousewheel-zoom hit test (QoL)
-                Client.viewportX = childX;
-                Client.viewportY = childY;
-                Client.viewportW = child.renderWidth;
-                Client.viewportH = child.renderHeight;
-                this.gameDrawMain(child.renderWidth, childX, child.renderHeight, childY);
+                Client.viewportX = viewX;
+                Client.viewportY = viewY;
+                Client.viewportW = viewW;
+                Client.viewportH = viewH;
+                this.gameDrawMain(viewW, viewX, viewH, viewY);
                 Pix2D.setClipping(clipLeft, clipTop, clipRight, clipBottom);
                 continue;
             }
@@ -10366,9 +11287,27 @@ export class Client extends GameShell {
                 try {
                     // mapback is loaded during boot (name tables are gone by now)
                     if (Client.mapback !== null && Client.field2010 !== null) {
-                        Pix2D.setClipping(childX, childY, childX + Client.mapbackCw, childY + Client.mapbackCh);
-                        Client.mapback.scanlinePlotSprite(childX, childY, Client.mapbackFullOffsets!, Client.mapbackFullLengths!);
-                        this.minimapDraw(Client.mapMaskCom!, child.drawCount, childX + 25, childY + 5);
+                        // MINIMAL FRAME. The stone surround is one sprite blit and nothing else
+                        // depends on it: the map circle and the compass are drawn through masks
+                        // derived from it once at boot (loadMapback), not read off it per frame.
+                        // So dropping the blit leaves a bare circle with the world in the corners,
+                        // and the ring is traced back off the same mask the map is drawn through.
+                        //
+                        // Fixed layout keeps the art whatever the setting says — the frame trim
+                        // sprites are authored to butt up against it, and without it they frame a
+                        // hole.
+                        const minimal: boolean = Client.roundMap();
+                        if (!minimal) {
+                            Pix2D.setClipping(childX, childY, childX + Client.mapbackCw, childY + Client.mapbackCh);
+                            Client.mapback.scanlinePlotSprite(childX, childY, Client.mapbackFullOffsets!, Client.mapbackFullLengths!);
+                        }
+                        // ONE mask, three consumers: the fill here, the ring below, and the click
+                        // test in loopLayer. A circle in this variable is a circle in all of them.
+                        const mapMask: IfType = Client.activeMapMask()!;
+                        this.minimapDraw(mapMask, child.drawCount, childX + 25, childY + 5);
+                        if (minimal) {
+                            Client.drawMinimapRing(childX + 25, childY + 5, mapMask);
+                        }
                         Pix2D.setClipping(childX, childY, childX + 33, childY + 33);
                         Client.drawCompass(child.drawCount, childX, childY, Client.compassMaskCom!);
                     }
@@ -10629,6 +11568,29 @@ export class Client extends GameShell {
                             colour = child.colour;
                         }
 
+                        // The chatbox is authored for PARCHMENT, and the cropped look replaces that
+                        // with a dark container. Black default text was remapped to white here
+                        // first, which missed the half of the problem that is not black: cs2
+                        // colours public chat a dark blue, and dark blue on a dark panel is just
+                        // as unreadable — it simply is not `0x0`, so a black-only test never saw
+                        // it. `readable` lifts anything too dark and leaves the rest alone, so the
+                        // per-line colours cs2 sets still mean what they meant.
+                        // ANY text on the dark chat panel, not just widget 137's.
+                        //
+                        // The chatbox is authored for parchment and so is everything the server
+                        // opens into it: NPC dialogue, "Click here to continue", Enter amount, the
+                        // make-X menus. Each is a separate cache interface with its own black or
+                        // navy text, so a test on widget 137 fixed the chat lines and left every
+                        // dialogue as dark-on-dark. Asking WHERE the text lands instead of WHO owns
+                        // it catches all of them, and catches the next one for free.
+                        //
+                        // Both halves are lifted: the component's colour, and the `<col=>` markup
+                        // inside the string, because a line can carry either or both.
+                        if (MobileLayout.cropped() && MobileLayout.overChatPanel(childX, childY)) {
+                            colour = HudSkin.readable(colour);
+                            text = HudSkin.readableMarkup(text);
+                        }
+
                         if (!font) {
                             if (IfType.loadingAsset) {
                                 ready = false;
@@ -10643,8 +11605,61 @@ export class Client extends GameShell {
                         font.drawStringMultiline(text, childX, childY, child.renderWidth, child.renderHeight, colour, child.shadow ? 0 : -1, child.hAlign, child.vAlign, child.lineHeight);
                     } else if (child.type === 5) {
                         if (child.v3) {
-                            const image: Pix32 | null = child.invobject === -1 ? child.getGraphic(false) : ObjType.getSprite(child.outline, child.invobject, child.invcount, child.showCount, child.shadowColour);
-                            if (image) {
+                            // CROPPED HUD. Two substitutions, both replacing a stone sprite:
+                            //
+                            //  - a tab PLATE (the rounded stone under one icon) draws nothing, so
+                            //    what is left of the row is the icons alone. The component itself
+                            //    is untouched — it carries the tab's op hook, so hiding it would
+                            //    take the button away with the art.
+                            //  - a row BACKDROP draws one rounded translucent container in place
+                            //    of the flat strip, which is what ties the icons together without
+                            //    putting them back in a box of stone.
+                            const plate: boolean = MobileLayout.isTabPlate(child.parentId);
+                            if (plate) {
+                                Client.drawTabCell(childX, childY, child.renderWidth, child.renderHeight, MobileLayout.isTabSelected(child.parentId));
+                            }
+                            // THE SCROLLBAR. Every IF3 scrollbar in the game is six sprites that
+                            // the cache's own clientscripts cc_create at runtime, so it is caught
+                            // here by sprite id rather than by component — see MobileLayout.
+                            // Replacing the art leaves the drag hooks and the arrow ops exactly
+                            // where they were, which is why this is a draw-time swap and not a
+                            // `hide`.
+                            const scroll: number = MobileLayout.scrollPart(child.graphic);
+                            if (scroll !== MobileLayout.SCROLL_NONE) {
+                                Client.drawScrollPart(scroll, childX, childY, child.renderWidth, child.renderHeight);
+                            }
+                            if (MobileLayout.isBoxed(child.parentId)) {
+                                // One box per CLUSTER, spanning every piece of it, drawn by
+                                // whichever backdrop paints first — null means another backdrop's
+                                // container already covers this one. See MobileLayout.CONTAINERS.
+                                const box = MobileLayout.containerRect(child.parentId);
+                                if (box !== null) {
+                                    Client.drawHudContainer(box.x, box.y, box.w, box.h);
+                                    // The chat cluster's container is drawn by com_1, the first
+                                    // child of the mode bar, so the chip row goes down here: after
+                                    // the slab and before anything else in the cluster has
+                                    // painted. Anywhere later would be over the chatbox's text.
+                                    if (child.parentId === (548 << 16) + 1) {
+                                        Client.drawChatChips();
+                                    }
+                                }
+                            }
+                            // A tab plate, a scrollbar piece and a boxed backdrop all resolve to NO
+                            // IMAGE on purpose: the skin has drawn what goes there, and the
+                            // component survives only for its op and its hit box.
+                            const skinned: boolean = plate || scroll !== MobileLayout.SCROLL_NONE || MobileLayout.isBoxed(child.parentId);
+                            const image: Pix32 | null = skinned ? null : child.invobject === -1 ? child.getGraphic(false) : ObjType.getSprite(child.outline, child.invobject, child.invcount, child.showCount, child.shadowColour);
+                            // UNIFORM ICONS. The cache's fourteen side-tab icons share a canvas but
+                            // not a size or a centre, which is most of why the strip reads as
+                            // fourteen unrelated pictures; the skin re-centres each on its stone
+                            // and caps the outsized ones. Safe to divert here because an icon
+                            // component carries no op and no hook — the plate beside it is the
+                            // button. It returns false if it cannot read the sprite's buffer, and
+                            // then the engine's own blit runs instead: worst case is an icon that
+                            // is not normalised, never an icon that is not drawn.
+                            if (image && MobileLayout.isTabIcon(child.parentId) && HudSkin.icon(image, childX + (child.renderWidth >> 1), childY + (child.renderHeight >> 1), 256 - (trans & 0xff), MobileLayout.tabIconName(child.parentId))) {
+                                // drawn by the skin
+                            } else if (image) {
                                 const imageWidth: number = image.owi;
                                 const imageHeight: number = image.ohi;
                                 if (child.tiling) {
@@ -10668,14 +11683,23 @@ export class Client extends GameShell {
                                     if (child.rotate !== 0) {
                                         image.pixelPerfectRotateScalePlotSprite(childY + ((child.renderHeight / 2) | 0), childX + ((child.renderWidth / 2) | 0), scale, child.rotate);
                                     } else if (trans !== 0) {
-                                        image.transScalePlotSprite(childX, childY, child.renderWidth, child.renderHeight, 256 - (trans & 0xff));
+                                        // Over the GPU scene, TAG the alpha instead of blending.
+                                        // Blending means compositing against the frame, and with
+                                        // the GPU renderer the scene is not in the frame — it is
+                                        // a canvas underneath showing through a hole whose pixels
+                                        // read as black, so a blended panel comes out dark and
+                                        // opaque rather than see-through. See PixMap's tag note.
+                                        image.transScalePlotSprite(childX, childY, child.renderWidth, child.renderHeight, 256 - (trans & 0xff), Client.glSceneActive);
                                     } else if (child.renderWidth === imageWidth && child.renderHeight === imageHeight) {
                                         image.plotSprite(childX, childY);
                                     } else {
                                         image.scalePlotSprite(childX, childY, child.renderWidth, child.renderHeight);
                                     }
                                 }
-                            } else if (IfType.loadingAsset) {
+                                // A plate or a boxed backdrop has no image ON PURPOSE, so neither
+                                // must be mistaken for one whose sprite has not finished loading —
+                                // that would hold `ready` false and re-dirty it forever.
+                            } else if (!skinned && IfType.loadingAsset) {
                                 ready = false;
                                 Client.componentUpdated(child);
                             }
@@ -10870,10 +11894,19 @@ export class Client extends GameShell {
                             y0 = childY;
                             y1 = childY + child.renderHeight;
                         }
+                        // The rules drawn on the chat panel — the one between the scrollback and the
+                        // line you type, and whatever a dialogue draws — are black on parchment,
+                        // which is nothing at all on the dark container. Same positional test as
+                        // the text above, for the same reason: the dialogue that draws one is not
+                        // widget 137.
+                        let colour: number = child.colour;
+                        if (MobileLayout.cropped() && MobileLayout.overChatPanel(childX, childY)) {
+                            colour = HudSkin.readable(colour);
+                        }
                         if (child.lineWidth === 1) {
-                            Pix2D.line(childX, y0, x1, y1, child.colour);
+                            Pix2D.line(childX, y0, x1, y1, colour);
                         } else {
-                            Pix2D.method485(childX, y0, x1, y1, child.colour, child.lineWidth);
+                            Pix2D.method485(childX, y0, x1, y1, colour, child.lineWidth);
                         }
                     }
                 }
@@ -11016,13 +12049,71 @@ export class Client extends GameShell {
             if (arg2 >= arg0 - var10 && arg6 <= arg4 && arg2 < arg0 + 16 && arg4 <= arg6 + arg3) {
                 arg5.scrollPosY += Client.mouseWheelRotation * 45;
                 Client.componentUpdated(arg5);
+                // Consume the rotation. followCamera()'s QoL zoom hit-tests only the viewport
+                // RECT, so without this a scrollable interface drawn over the viewport (the quest
+                // journal, any if_openmain screen) scrolls AND zooms the camera behind it on the
+                // same notch. The interface loop runs earlier in the tick than followCamera(),
+                // so zeroing here gives interface scrollbars priority — which is exactly what
+                // the comment in followCamera() already claims happens.
+                Client.mouseWheelRotation = 0;
             }
         }
+    }
+
+    /**
+     * One piece of an IF3 scrollbar, in place of its cache sprite.
+     *
+     * The six pieces are independent components drawn at their own rects, so there is nothing to
+     * coordinate: the track draws a track, the grip draws a grip where cs2 has already put it, and
+     * the two 16x5 grip CAPS draw nothing at all — they exist to round off a stone grip that is no
+     * longer stone, and they are the only two of the six with no op on them.
+     */
+    static drawScrollPart(part: number, x: number, y: number, w: number, h: number): void {
+        if (part === MobileLayout.SCROLL_TRACK) {
+            HudSkin.bar(x, y, w, h, false);
+        } else if (part === MobileLayout.SCROLL_GRIP) {
+            HudSkin.bar(x, y, w, h, true);
+        } else if (part === MobileLayout.SCROLL_UP || part === MobileLayout.SCROLL_DOWN) {
+            HudSkin.chevron(x, y, w, h, part === MobileLayout.SCROLL_UP);
+        }
+    }
+
+    /**
+     * The cropped HUD's scrollbar: a track and a grip, and nothing else.
+     *
+     * The cache's bar is two arrow sprites plus a filled track plus four bevel lines per grip — a
+     * chunk of stone the width of a finger down the side of an interface.
+     *
+     * NOTHING HERE TOUCHES HIT-TESTING. `doScrollbar` does its own arithmetic against a 16px-wide
+     * column with 16px arrow boxes top and bottom and the drag band between them; this is handed
+     * the same rect and draws a slim bar down the middle of it, using the cache's own grip maths so
+     * the grip is where the drag believes it is. The arrow boxes simply stop being drawn — they
+     * stay exactly as clickable as they were, which is why the track runs between them rather than
+     * over them.
+     *
+     * WHICH INTERFACES THIS REACHES IS NARROWER THAN IT LOOKS, and the note is here because the
+     * mistake has already been made once: `drawScrollbar` is called under `type === 0 && !v3`, so
+     * this is the **IF1** bar only. Every component of pane 548 and of the chatbox's widget 137 is
+     * IF3, and their scrollbars are six sprites `cc_create`d by the cache's own clientscripts 30/31
+     * — a different thing entirely, restyled at the GRAPHIC branch instead.
+     */
+    static drawSlimScrollbar(x: number, y: number, height: number, scrollPos: number, scrollHeight: number): void {
+        let grip: number = (Math.imul(height - 32, height) / scrollHeight) | 0;
+        if (grip < 8) {
+            grip = 8;
+        }
+        const offset: number = (Math.imul(scrollPos, height - grip - 32) / (scrollHeight - height)) | 0;
+        HudSkin.bar(x, y + 16, 16, height - 32, false);
+        HudSkin.bar(x, y + 16 + offset, 16, grip, true);
     }
 
     // jag::oldscape::Client::DrawScrollbar
     static drawScrollbar(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number): void {
         if (arg3 <= 0 || arg3 <= arg1) {
+            return;
+        }
+        if (MobileLayout.cropped()) {
+            Client.drawSlimScrollbar(arg4, arg2, arg1, arg0, arg3);
             return;
         }
         let var5: number = (Math.imul(arg1 - 32, arg1) / arg3) | 0;
@@ -11328,7 +12419,7 @@ export class Client extends GameShell {
                                 if (var21 && Client.mapMaskCom !== null) {
                                     // rebase to the map circle at (+25,+5): its 146x151 rect centres
                                     // at (73,75) — Java Class40.method934's exact click origin
-                                    Client.minimapLoop(ClientMouseListener.mouseClickX - var10 - 25, -var11 + ClientMouseListener.mouseClickY - 5, Client.mapMaskCom);
+                                    Client.minimapLoop(ClientMouseListener.mouseClickX - var10 - 25, -var11 + ClientMouseListener.mouseClickY - 5, Client.activeMapMask()!);
                                 }
                                 continue;
                             }
@@ -11691,6 +12782,15 @@ export class Client extends GameShell {
                     }
                     // DO NOT SEND IF_BUTTOND (132): rev-500 12-byte body vs server size 6 —
                     // 6 excess bytes poison the stream. Drags go through INV_BUTTOND (121) instead.
+                } else if (Client.clickModeOption() !== -1) {
+                    // A hotkey mode is pinning a verb (Drop / Use) to the left click. Same idea as
+                    // the shift-click below, minus the shift, and checked first so holding shift
+                    // while a mode is on cannot fight it.
+                    Client.doAction(Client.clickModeOption());
+                } else if (Client.shiftMenuOption() !== -1) {
+                    // Shift-click runs the interface's bulk/drop option instead of its default, and
+                    // takes priority over the one-button-mode menu so it stays a single click.
+                    Client.doAction(Client.shiftMenuOption());
                 } else if ((Client.oneMouseButton === 1 || Client.isAddFriendOption(Client.menuNumEntries - 1)) && Client.menuNumEntries > 2) {
                     this.openMenu();
                 } else if (Client.menuNumEntries > 0) {
@@ -12028,9 +13128,14 @@ export class Client extends GameShell {
             Client.componentUpdated(Client.resumePauseCom);
             Client.resumePauseCom = null;
         }
-        Client.isMenuOpen = false;
-        Client.menuNumEntries = 0;
-        Client.dirtyArea(Client.menuHeight, Client.menuWidth, Client.menuY, Client.menuX);
+        // Only a MODAL open (type 0) dismisses an open right-click menu. Walkable overlays
+        // (wilderness level, BA roles — sent with the walkable type byte 0xff) arrive
+        // mid-combat and must never touch the menu.
+        if (arg0 === 0) {
+            Client.isMenuOpen = false;
+            Client.menuNumEntries = 0;
+            Client.dirtyArea(Client.menuHeight, Client.menuWidth, Client.menuY, Client.menuX);
+        }
         if (var4 !== null) {
             Client.computeLayerLayout(false, var4);
         }
@@ -12058,9 +13163,11 @@ export class Client extends GameShell {
         // was not drawn this cycle (it was covered by the modal being closed), leaving stale
         // pixels over the frame.
         Client.redrawAllComponents();
-        Client.menuNumEntries = 0;
-        Client.isMenuOpen = false;
-        Client.dirtyArea(Client.menuHeight, Client.menuWidth, Client.menuY, Client.menuX);
+        // 464 damage parity: closing an interface (combat damage runs if_close server-side,
+        // which can close the bank etc. mid-fight) must NOT dismiss an open right-click menu.
+        // Menu entries are frozen while the menu is open; a stale entry on a closed interface
+        // is harmless — IfType.get() reloads definitions on demand and the server validates
+        // the op. redrawAllComponents() above already repaints everything.
         if (Client.toplevelinterface !== -1) {
             Client.runHookImmediate(Client.toplevelinterface, 1);
         }
@@ -12151,6 +13258,8 @@ export class Client extends GameShell {
     static mapbackFullOffsets: Int32Array | null = null;
     static mapbackFullLengths: Int32Array | null = null;
     static mapMaskCom: IfType | null = null;
+    /** The same box as `mapMaskCom`, but an actual circle. See `buildRoundMapMask`. */
+    static mapRoundCom: IfType | null = null;
     static compassMaskCom: IfType | null = null;
 
     static loadMapback(): void {
@@ -12224,6 +13333,7 @@ export class Client extends GameShell {
         mapCom.renderHeight = 151;
         mapCom.graphicMaskLineOffsets = mapOff;
         mapCom.graphicMaskLineLengths = mapLen;
+        Client.mapRoundCom = Client.buildRoundMapMask();
         const compassCom = new IfType();
         compassCom.renderWidth = 33;
         compassCom.renderHeight = 33;
@@ -12241,6 +13351,436 @@ export class Client extends GameShell {
         Client.mapMaskCom = mapCom;
         Client.compassMaskCom = compassCom;
         Client.mapback = PixLoader.makeSoftwarePix32();
+    }
+
+    /**
+     * A perfect circle in the same 146x151 box the cache mask uses, for the frameless minimap.
+     *
+     * WHY THIS EXISTS. The map's shape has never been a circle. `loadMapback` derives it by
+     * scanning the transparent pixels of the `mapback` STONE SPRITE and then forcing the top-left
+     * 35x35 opaque so the compass corner is punched out of it — so the "circle" carries the
+     * sprite's own flat bottom edge and a bite out of one corner. With the stone surround drawn
+     * over it that is invisible and correct; with the surround gone it is the whole shape, and
+     * `drawMinimapRing` traces it faithfully, which is why the ring looked wrong at the bottom.
+     * Nothing was drawing badly — it was drawing the wrong shape correctly.
+     *
+     * One mask feeds three consumers — `minimapDraw` fills through it, `drawMinimapRing` traces
+     * it, and `minimapLoop` measures clicks against it — so a circle here is a circle in all
+     * three, with no second idea of where the map ends to keep in sync.
+     *
+     * Radius 73 (half of 146) centred at (73, 75): the widest circle the box holds, leaving two
+     * rows top and bottom for the ring. That centre is also exactly where `minimapDraw` paints the
+     * 3x3 white self-dot, which is a free check that it is the real centre.
+     *
+     * The cache-derived mask is kept and still used by the fixed layout, where the stone trim is
+     * authored to butt up against that irregular edge.
+     */
+    private static buildRoundMapMask(): IfType {
+        const w: number = 146;
+        const h: number = 151;
+        const mask = HudSkin.circleMask(w, h);
+        const com = new IfType();
+        com.renderWidth = w;
+        com.renderHeight = h;
+        com.graphicMaskLineOffsets = mask.offsets;
+        com.graphicMaskLineLengths = mask.lengths;
+        return com;
+    }
+
+    /**
+     * The map mask in force this frame: a true circle for the frameless minimap, the cache's own
+     * irregular cut-out when the stone surround is drawn around it.
+     *
+     * Both are 146x151, so the click maths in `minimapLoop` — which only reads the size — is the
+     * same either way; this exists so the fill, the ring and the hit test cannot pick differently.
+     */
+    static activeMapMask(): IfType | null {
+        return Client.roundMap() ? Client.mapRoundCom : Client.mapMaskCom;
+    }
+
+    /** Is the frameless (round) minimap in force? The setting, and only in the resizable layout. */
+    static roundMap(): boolean {
+        return ControlBar.settings.minimalMap && ScreenMode.resizable && Client.mapRoundCom !== null;
+    }
+
+    /**
+     * The cell behind one side-tab icon, in place of the cache's stone plate.
+     *
+     * The shape and the palette are `HudSkin`'s — see that file for why nothing about how this
+     * looks is allowed to live here. All this site knows is WHERE the stone goes and WHETHER it is
+     * the open one, and it clips to the component's own box on the way in because a cell must not
+     * be able to paint over its neighbour.
+     *
+     * Which cell is lit comes from the panel mapping `MobileLayout` learns by watching tabs get
+     * used, so it needs no idea which sprite the cache uses for a pressed plate; a tab never yet
+     * opened simply draws unlit.
+     */
+    static drawTabCell(x: number, y: number, w: number, h: number, selected: boolean): void {
+        const minX: number = Pix2D.clipMinX;
+        const minY: number = Pix2D.clipMinY;
+        const maxX: number = Pix2D.clipMaxX;
+        const maxY: number = Pix2D.clipMaxY;
+        Pix2D.setClipping(x, y, x + w, y + h);
+        HudSkin.stone(x, y, w, h, selected);
+        Pix2D.setClipping(minX, minY, maxX, maxY);
+    }
+
+    /**
+     * The run toggle lives at `options_tab:com_0` — interface 261, child 0.
+     *
+     * Found rather than assumed: 261's child 0 is a 40x40 `actionType 4` button whose cs1 script
+     * reads **varp 173**, which is the run mode, and the server implements
+     * `[if_button,options_tab:com_0]` as `p_run(2)`. Every side interface is loaded at login
+     * (`~initalltabs` calls `if_settab` for all of them), so the component exists and this works
+     * whether or not the Options tab is the one on screen.
+     */
+    private static readonly RUN_BUTTON: number = (261 << 16) | 0;
+    private static readonly RUN_VARP: number = 173;
+
+    /**
+     * Click an IF1 button from code, exactly as a tap on it would.
+     *
+     * This is `doAction`'s case 36 — the IF1 toggle — lifted out so a hotkey can reach it: send
+     * `IF_BUTTON` with the packed component id, then flip the varp the component's cs1 script
+     * reads, which is the client predicting the toggle rather than waiting a tick for the server
+     * to send it back. Both halves matter; without the local flip the button's lit state lags.
+     */
+    static fireIf1Button(com: number): void {
+        const type: IfType | null = IfType.get(com);
+        if (type === null) {
+            return;
+        }
+        Client.out.p1Enc(ClientProt.IF_BUTTON);
+        Client.out.p4(com);
+        if (type.scripts !== null && type.scripts[0] !== null && type.scripts[0]![0] === 5) {
+            const varp: number = type.scripts[0]![1];
+            VarCache.var[varp] = 1 - VarCache.var[varp];
+            Client.clientVar(varp);
+        }
+    }
+
+    /**
+     * The spec bar's child index, per weapon-category combat interface.
+     *
+     * There is no single answer, which is why this is a table: the combat interfaces are separate
+     * cache interfaces per weapon category and the bar sits at child **8 in some and 10 in
+     * others**. Generated from the server's own symbol pack, where the flat id of
+     * `combat_<category>:specbar` minus the interface's base gives the index — cross-checked
+     * against `combat_unarmed`, whose child 8 is a 155x22 `actionType 1` RECTANGLE, and whose
+     * neighbouring model reads varp 300, the spec energy.
+     *
+     * The server implements `[if_button,combat_<category>:specbar] @toggle_sa` for every one of
+     * them, so firing the button is the whole job.
+     */
+    private static readonly SPEC_BARS: Map<number, number> = new Map([
+        [75, 10], // axe
+        [76, 8], // spiked
+        [77, 8], // bow
+        [79, 8], // crossbow
+        [81, 10], // hacksword
+        [82, 10], // heavysword
+        [83, 10], // pickaxe
+        [84, 8], // scythe
+        [87, 10], // spear
+        [88, 10], // blunt
+        [89, 10], // stabsword
+        [91, 8], // thrown
+        [92, 8], // unarmed
+        [93, 8] // whip
+    ]);
+
+    /** varp 301 `sa_attack`: is the special attack armed? (300 is the energy the bar draws.) */
+    private static readonly SPEC_ARMED_VARP: number = 301;
+
+    /**
+     * The spec bar of whichever combat interface is loaded, or -1 if this weapon has none.
+     *
+     * The side panels are searched rather than the Combat slot assumed. It is one hash lookup per
+     * panel and it sidesteps the off-by-one that has already bitten this HUD once: there are 14
+     * panels for 13 tabs, so "the Combat panel is index 0" is an assumption, whereas "the panel
+     * holding an interface with a spec bar is the combat one" is a fact.
+     *
+     * `hide` is the weapon test. `~update_weapon_category` hides the bar unless the equipped
+     * weapon has the `specwep` param, so a hidden bar means this weapon has no special attack —
+     * and firing a hidden component would be firing a button the player cannot see.
+     */
+    static specBarComponent(): number {
+        for (let i = 0; i < 14; i++) {
+            const sub = Client.subinterfaces.find(BigInt((548 << 16) | (86 + i))) as SubInterface | null;
+            if (sub === null) {
+                continue;
+            }
+            const index: number | undefined = Client.SPEC_BARS.get(sub.id);
+            if (index === undefined) {
+                continue;
+            }
+            const com: IfType | null = IfType.get((sub.id << 16) | index);
+            return com === null || com.hide ? -1 : (sub.id << 16) | index;
+        }
+        return -1;
+    }
+
+    /**
+     * The five action hotkeys, registered once at boot.
+     *
+     * Each one is a thing the always-visible tab strip cannot do. Two of them — Drop and Use —
+     * are the same mechanism: a persistent promotion of one menu verb to the left click, which is
+     * what "tap to drop" means. Two more surface settings that were previously buried in the
+     * panel, and the fifth reaches into a side interface without opening it.
+     */
+    static registerHotkeys(): void {
+        HotkeyBar.register([
+            {
+                label: 'RUN',
+                title: 'Toggle run',
+                on: (): boolean => VarCache.var[Client.RUN_VARP] === 1,
+                fire: (): void => Client.fireIf1Button(Client.RUN_BUTTON)
+            },
+            {
+                label: 'DROP',
+                title: 'Tap to drop — a tap on an inventory item drops it',
+                on: (): boolean => Client.clickVerb === 'drop',
+                fire: (): void => Client.setClickVerb('drop')
+            },
+            {
+                label: 'USE',
+                title: 'Tap to use — tap one item then another to combine them',
+                on: (): boolean => Client.clickVerb === 'use',
+                fire: (): void => Client.setClickVerb('use')
+            },
+            {
+                label: 'SPEC',
+                title: 'Special attack — only on a weapon that has one',
+                on: (): boolean => VarCache.var[Client.SPEC_ARMED_VARP] === 1,
+                fire: (): void => {
+                    const bar: number = Client.specBarComponent();
+                    if (bar !== -1) {
+                        Client.fireIf1Button(bar);
+                    }
+                }
+            },
+            {
+                label: 'LOOT',
+                title: 'Ground item labels — names over the piles on the floor',
+                // BOTH sides of this setting, via the one call that keeps them in step.
+                //
+                // `ControlBar.setGroundItems` only stores the preference and repaints the settings
+                // panel; the draw reads `Client.showGroundItems`, which is a separate field synced
+                // at boot and by `ControlBar.onGroundItemsChange`. Calling the storing half alone
+                // lit this cell and changed nothing on screen. `setGroundItemsMode` is the pair —
+                // it is what `::grounditems` uses — and the lit state reads the field the draw
+                // reads, so a future desync would show up here rather than hide behind it.
+                on: (): boolean => Client.showGroundItems,
+                fire: (): void => Client.setGroundItemsMode(!Client.showGroundItems)
+            }
+        ]);
+    }
+
+    /**
+     * The menu verb the left click is currently promoting, or null for normal behaviour.
+     *
+     * "Tap to drop" and "tap to combine" are the same idea as shift-click, minus the shift and
+     * pinned on: find the entry whose verb is this one and run it instead of the default. Sharing
+     * the mechanism means they cannot disagree with each other about what a bulk option is.
+     */
+    static clickVerb: 'drop' | 'use' | null = null;
+
+    static setClickVerb(verb: 'drop' | 'use'): void {
+        Client.clickVerb = Client.clickVerb === verb ? null : verb;
+    }
+
+    /**
+     * The menu entry the click-verb mode wants, or -1.
+     *
+     * Nothing is promoted while an item is already selected: with `Use` armed, the second tap must
+     * be "use the held item on this one", which is the DEFAULT entry at that moment. Promoting
+     * `Use` again would just re-select the second item and combining would never happen.
+     */
+    static clickModeOption(): number {
+        if (Client.clickVerb === null || Client.targetMode || Client.menuNumEntries < 2) {
+            return -1;
+        }
+        for (let i = Client.menuNumEntries - 1; i > 0; i--) {
+            const raw = Client.menuVerb[i];
+            if (raw === null || raw === undefined) {
+                continue;
+            }
+            if (
+                raw
+                    .replace(/<[^>]*>/g, '')
+                    .trim()
+                    .toLowerCase() === Client.clickVerb
+            ) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Draw the hotkey row. Lit cell for a mode that is on, three to five characters of label.
+     *
+     * Resizable layout only — the fixed frame has no spare bottom-left corner, it has stone there.
+     */
+    static drawHotkeyBar(): void {
+        if (Client.p11 === null || HotkeyBar.slots.length === 0 || !MobileLayout.cropped()) {
+            return;
+        }
+        // The column is specified in CSS pixels and drawn in frame ones; hand it the conversion.
+        // Both the draw and the hit test go through this, so they cannot disagree about where a
+        // cell is — which they would the moment the window changed size between them.
+        Client.syncHotkeyBar();
+        const frameW: number = GameShell.sWid;
+        const frameH: number = GameShell.sHei;
+        for (let i = 0; i < HotkeyBar.slots.length; i++) {
+            const slot = HotkeyBar.slots[i];
+            const on: boolean = slot.on();
+            const r = HotkeyBar.rect(i, frameW, frameH);
+            HudSkin.iconButton(r.x, r.y, r.w, r.h, on);
+            Client.p11.centreString(slot.label, r.x + (r.w >> 1), r.y + (r.h >> 1) + 4, HotkeyBar.labelColour(on), 0);
+        }
+    }
+
+    /** A click on the hotkey row, claimed before the interface walk or the scene can have it. */
+    static loopHotkeyBar(): void {
+        if (ClientMouseListener.mouseClickButton !== 1 || !MobileLayout.cropped()) {
+            return;
+        }
+        Client.syncHotkeyBar();
+        const slot: number = HotkeyBar.at(ClientMouseListener.mouseClickX, ClientMouseListener.mouseClickY, GameShell.sWid, GameShell.sHei);
+        if (slot < 0) {
+            return;
+        }
+        HotkeyBar.slots[slot].fire();
+        Client.redrawAllComponents();
+        ClientMouseListener.mouseClickButton = 0;
+    }
+
+    /**
+     * The chat tab row — All / Game / Public / Private / Trade — across the chat-mode bar.
+     *
+     * Drawn rather than built out of components, because the cache has four cells here and this
+     * needs five, and because a chip is a name over a state in a rounded cell, which no cache
+     * component is. The four cache cells are still under it doing their real job: each one is
+     * parked under its chip's state line, so tapping the state cycles On/Friends/Off through the
+     * cache's own hook. See MobileLayout.CHAT_MODE_CELLS.
+     *
+     * The state text is read from the same client fields the cache's cs2 reads
+     * (`chatPublicMode` / `chatPrivateMode` / `chatTradeMode`), so the two cannot disagree. Chips
+     * with no mode behind them — All and Game — show a line count instead of a state, which is
+     * the one thing a filter tab can usefully say about itself.
+     */
+    static drawChatChips(): void {
+        const bar: IfType | null = IfType.get((548 << 16) | MobileLayout.CHATMODES);
+        if (bar === null || bar.hide || Client.b12 === null || Client.p11 === null) {
+            return;
+        }
+        for (let i = 0; i < CHAT_CHIPS.length; i++) {
+            const rect = MobileLayout.chipRect(i);
+            const x: number = bar.renderX + rect.x;
+            const y: number = bar.renderY + rect.y;
+            const active: boolean = ChatFilter.active === i;
+            HudSkin.chip(x, y, rect.w, rect.h, active);
+            const centre: number = x + (rect.w >> 1);
+            const mode: number = Client.chatModeOf(i);
+            if (mode < 0) {
+                // No chat-mode behind this tab, so its name is CENTRED rather than sitting on the
+                // top line with a hole under it. That hole is what made All and Game look like
+                // they had failed to draw something the others had.
+                Client.p11.centreString(CHAT_CHIPS[i].label, centre, y + (rect.h >> 1) + 4, active ? HudSkin.TEXT_LIT : HudSkin.TEXT, 0);
+                continue;
+            }
+            Client.p11.centreString(CHAT_CHIPS[i].label, centre, y + 12, active ? HudSkin.TEXT_LIT : HudSkin.TEXT, 0);
+            Client.p11.centreString(Client.CHAT_MODE_LABELS[i - 2][Math.max(0, Math.min(3, mode))], centre, y + rect.h - 3, mode === 0 ? HudSkin.TEXT_ON : mode === 1 ? HudSkin.TEXT_PART : HudSkin.TEXT_OFF, 0);
+        }
+    }
+
+    /**
+     * What each chat-mode value is called, per chip — Public, Private, Trade.
+     *
+     * NOT one shared table. Public has a fourth state, `Hide` (received but not shown), that the
+     * other two do not, and a single list showed a private filter of 3 as "Hide" in green — which
+     * is both the wrong word and the wrong colour for a filter that is off. The values are the
+     * cache's own: 0 On, 1 Friends, 2 Off, 3 Hide.
+     */
+    private static readonly CHAT_MODE_LABELS: string[][] = [
+        ['On', 'Friends', 'Off', 'Hide'], // Public
+        ['On', 'Friends', 'Off', 'Off'], // Private
+        ['On', 'Friends', 'Off', 'Off'] // Trade
+    ];
+
+    /** The chat-mode value behind a chip, or -1 for a tab that is only a filter. */
+    private static chatModeOf(chip: number): number {
+        return chip === 2 ? Client.chatPublicMode : chip === 3 ? Client.chatPrivateMode : chip === 4 ? Client.chatTradeMode : -1;
+    }
+
+    /**
+     * A click on the chat tab row, consumed before anything else can have it.
+     *
+     * The chips are pixels, not components, so they get no help from the interface walk — but they
+     * sit ON a component (the chat-mode bar) that IS in `MobileLayout.CLUSTERS`, so a tap here was
+     * never going to fall through and walk the player. All this has to do is claim it first.
+     *
+     * The lower strip of a chip belongs to the cache's mode cell parked under it, and is left
+     * alone: `chipAt` is only consulted above that strip.
+     */
+    static loopChatChips(): void {
+        if (ClientMouseListener.mouseClickButton !== 1 || !MobileLayout.cropped()) {
+            return;
+        }
+        const chip: number = MobileLayout.chipAt(ClientMouseListener.mouseClickX, ClientMouseListener.mouseClickY);
+        if (chip < 0) {
+            return;
+        }
+        Client.selectChatTab(chip);
+        ClientMouseListener.mouseClickButton = 0;
+    }
+
+    /**
+     * One rounded translucent container behind a HUD cluster, in place of the cache's flat strip.
+     */
+    static drawHudContainer(x: number, y: number, w: number, h: number): void {
+        // THE BOX HAS TO ESCAPE ITS OWN COMPONENT'S CLIP.
+        //
+        // A container spans a whole CLUSTER, but it is drawn by one backdrop inside one of them —
+        // and `drawLayer` sets the clip to the PARENT's box before drawing its children. So the
+        // tab container, drawn by com_11 inside the 37-tall lower row, was cut to those 37 rows:
+        // the bottom row got its bar and the top row appeared to have none at all.
+        //
+        // Widen to the box, draw, put back exactly what was there. Restoring is not optional — the
+        // caller is mid-way through a layer's children and every sibling after this one relies on
+        // that clip still being the parent's.
+        const minX: number = Pix2D.clipMinX;
+        const minY: number = Pix2D.clipMinY;
+        const maxX: number = Pix2D.clipMaxX;
+        const maxY: number = Pix2D.clipMaxY;
+        Pix2D.setClipping(x, y, x + w, y + h);
+        HudSkin.panel(x, y, w, h);
+        Pix2D.setClipping(minX, minY, maxX, maxY);
+    }
+
+    /**
+     * Outline the map circle, for the mode that draws no frame sprite.
+     *
+     * Traced from the mask's own per-row runs — `graphicMaskLineOffsets`/`Lengths`, the very runs
+     * `minimapDraw` fills the map through — so the ring cannot drift off the map's edge at any
+     * row, whatever the mask turns out to be. Deriving a circle from a radius instead would be a
+     * second, independently-wrong idea of where the map ends.
+     *
+     * The tracing itself is `HudSkin.ring` — it is pure Pix2D over the run table, so it lives with
+     * the rest of the drawn language and can be rendered by the offline preview tool. All this
+     * wrapper adds is the clip, widened by the ring's own thickness so the outline is not shaved
+     * off at the mask's extremes.
+     */
+    static drawMinimapRing(x: number, y: number, mask: IfType): void {
+        const offsets: Int32Array | null = mask.graphicMaskLineOffsets;
+        const lengths: Int32Array | null = mask.graphicMaskLineLengths;
+        if (offsets === null || lengths === null) {
+            return;
+        }
+        const t: number = HudSkin.RING_W;
+        Pix2D.setClipping(x - t, y - t, x + mask.renderWidth + t, y + mask.renderHeight + t);
+        HudSkin.ring(x, y, offsets, lengths, mask.renderHeight);
     }
 
     minimapDraw(com: IfType, redrawIndex: number, x: number, y: number): void {
@@ -12422,6 +13962,27 @@ export class Client extends GameShell {
         Client.field2483[0] = arg1;
         Client.chatScreenName[0] = arg4;
         Client.chatTransmitNum = Client.transmitNum;
+        // The chat tabs are a filtered view of this ring; hand it the types it filters on. The
+        // reference is kept rather than copied, so the view can never disagree with the history.
+        ChatFilter.onMessage(Client.chatType, Client.chatHistoryLength);
+    }
+
+    /**
+     * Switch chat tab, and make the cache's own chatbox rebuild itself off the filtered list.
+     *
+     * `onchattransmit` re-runs for a component whose `transmitNum` is older than
+     * `Client.chatTransmitNum` (see the hook dispatch in `loopLayer`), which is exactly the signal
+     * `addChat` raises when a line arrives. Raising it here means a tab switch takes the identical
+     * path a new message does — the cache relays out widget 137, its scrollbar re-derives its own
+     * extent, and this client needs to know nothing about either.
+     */
+    static selectChatTab(chip: number): void {
+        if (chip === ChatFilter.active) {
+            return;
+        }
+        ChatFilter.select(chip);
+        Client.chatTransmitNum = Client.transmitNum;
+        Client.redrawAllComponents();
     }
 
     // jag::oldscape::FriendSystem::IsFriend
