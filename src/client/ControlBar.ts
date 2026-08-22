@@ -1,5 +1,6 @@
 import ClientKeyboardListener from '#/client/ClientKeyboardListener.js';
 import HudSkin from '#/client/HudSkin.js';
+import If3Live from '#/client/If3Live.js';
 import MobileLayout from '#/client/MobileLayout.js';
 import ScreenMode from '#/client/ScreenMode.js';
 import GlRenderer from '#/dash3d/GlRenderer.js';
@@ -8,14 +9,15 @@ import World from '#/dash3d/World.js';
 // Plain-DOM settings panel that lives with the client (see public/index.html), in the spirit of the
 // 2004scape webclient's text controls. It owns every client-side user preference - display mode,
 // WASD camera, the side-tab hotkey bindings - persists them to localStorage and renders one
-// settings button that opens a tabbed panel.
+// settings button that opens a tabbed panel (Display / HUD / Game / Hotkeys).
 //
 // It deliberately imports nothing from Client: Client imports ControlBar, reads ControlBar.settings
 // on boot and registers `onWasdChange`, so there is no module cycle. ScreenMode is import-safe for
 // the same reason (it talks to GameShell/IfType, never to Client).
 //
 // Adding a control is one entry in the registry below - the panel is rendered from `controls`, not
-// hardcoded, and a control's `tab` decides which page it lands on.
+// hardcoded, and a control's `tab` decides which page it lands on. The panel body scrolls; a
+// control's `hint` is a tooltip, not a paragraph, so the page stays one row per setting.
 
 export type ChoiceOption = {
     label: string;
@@ -188,7 +190,8 @@ const STORAGE_KEY: string = 'rune465.settings.v2';
 const LEGACY_KEY: string = 'rune465.controlbar.v1';
 
 export const TAB_DISPLAY: string = 'Display';
-export const TAB_CAMERA: string = 'Camera';
+export const TAB_HUD: string = 'HUD';
+export const TAB_GAME: string = 'Game';
 export const TAB_HOTKEYS: string = 'Hotkeys';
 
 // Side tabs of the 465 fixed game frame (window 548), in sidebar order (top row left-to-right,
@@ -473,7 +476,7 @@ export default class ControlBar {
             label: 'Layout',
             kind: 'choice',
             tab: TAB_DISPLAY,
-            hint: '(resizable fills the window: the 3D scene becomes the whole frame and the HUD anchors to the corners)',
+            hint: 'Resizable fills the window: the 3D scene becomes the whole frame and the HUD anchors to the corners.',
             options: [
                 { label: 'Fixed', value: 0 },
                 { label: 'Resizable', value: 1 }
@@ -490,115 +493,12 @@ export default class ControlBar {
             }
         });
         ControlBar.controls.push({
-            id: 'edgemargin',
-            label: 'Edge margin',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: "(resizable only: how much of the phone's side safe area the HUD keeps clear. None pulls the tabs, minimap and hotkeys out to the glass — correct unless the notch is on that side, which you can see at a glance)",
-            options: [
-                { label: 'Full', value: EDGE_FULL },
-                { label: 'Half', value: EDGE_HALF },
-                { label: 'None', value: EDGE_NONE }
-            ],
-            getChoice: (): number => ControlBar.settings.edgeMargin,
-            setChoice: (value: number): void => {
-                ControlBar.settings.edgeMargin = value;
-                ControlBar.save();
-                ScreenMode.setEdgeMargin(value);
-            }
-        });
-        ControlBar.controls.push({
-            id: 'hudsize',
-            label: 'HUD size',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: '(resizable only: how large the HUD is drawn. Large fills the screen but an open side panel covers part of the minimap; Fit is the height at which they stop touching)',
-            options: [
-                { label: 'Large', value: HUD_MIN_LARGE },
-                { label: 'Medium', value: HUD_MIN_MEDIUM },
-                { label: 'Fit', value: HUD_MIN_FIT }
-            ],
-            getChoice: (): number => ControlBar.settings.hudMin,
-            setChoice: (value: number): void => {
-                ControlBar.settings.hudMin = value;
-                ControlBar.save();
-                ScreenMode.setMinHeight(value);
-            }
-        });
-        ControlBar.controls.push({
-            id: 'hudtrans',
-            label: 'HUD panels',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: '(resizable only: alpha on the panel art, so the world shows through behind chat, tabs and the sidebar - icons and text stay solid)',
-            options: [
-                { label: 'Solid', value: 0 },
-                { label: 'See-through', value: HUD_TRANS_LIGHT },
-                { label: 'Ghost', value: HUD_TRANS_HEAVY }
-            ],
-            getChoice: (): number => ControlBar.settings.hudTrans,
-            setChoice: (value: number): void => {
-                ControlBar.settings.hudTrans = value;
-                ControlBar.save();
-                ControlBar.applyHudTrans(value);
-            }
-        });
-        ControlBar.controls.push({
-            id: 'sidetabs',
-            label: 'Side tabs',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: '(resizable only: one column keeps the seven combat and inventory tabs and folds away Friends, Ignore, Logout, Options, Emotes and Music)',
-            options: [
-                { label: 'Two columns', value: 0 },
-                { label: 'One column', value: 1 }
-            ],
-            getChoice: (): number => (ControlBar.settings.oneColumn ? 1 : 0),
-            setChoice: (value: number): void => {
-                ControlBar.settings.oneColumn = value === 1;
-                ControlBar.save();
-                MobileLayout.stonesCollapsed = ControlBar.settings.oneColumn;
-            }
-        });
-        ControlBar.controls.push({
-            id: 'minimalmap',
-            label: 'Minimap frame',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: '(resizable only: the bare map circle with a thin ring, instead of the stone frame the fixed layout is built around)',
-            options: [
-                { label: 'Cache art', value: 0 },
-                { label: 'Thin ring', value: 1 }
-            ],
-            getChoice: (): number => (ControlBar.settings.minimalMap ? 1 : 0),
-            setChoice: (value: number): void => {
-                ControlBar.settings.minimalMap = value === 1;
-                ControlBar.save();
-            }
-        });
-        ControlBar.controls.push({
-            id: 'menurows',
-            label: 'Menu rows',
-            kind: 'choice',
-            tab: TAB_DISPLAY,
-            hint: "(right-click menu row height, held constant in real screen pixels - the cache's 15 is about 11pt on a phone)",
-            options: [
-                { label: 'Cache (15)', value: MENU_ROWS_CACHE },
-                { label: 'Large', value: MENU_ROWS_LARGE },
-                { label: 'Huge', value: MENU_ROWS_HUGE }
-            ],
-            getChoice: (): number => ControlBar.settings.menuRows,
-            setChoice: (value: number): void => {
-                ControlBar.settings.menuRows = value;
-                ControlBar.save();
-            }
-        });
-        ControlBar.controls.push({
             id: 'detail',
             label: '3D detail',
             kind: 'choice',
             tab: TAB_DISPLAY,
-            hint: '(half res renders the 3D scene at 1/4 the pixels and upscales - much faster at large sizes)',
+            group: 'Graphics',
+            hint: 'Half res renders the 3D scene at 1/4 the pixels and upscales — much faster at large sizes.',
             options: [
                 { label: 'Full res', value: 1 },
                 { label: 'Half res', value: 2 }
@@ -615,12 +515,13 @@ export default class ControlBar {
             label: 'Draw distance',
             kind: 'choice',
             tab: TAB_DISPLAY,
-            hint: '(landscape is drawn this far in tiles; the far clip follows - players/NPCs only appear as far as the server sends them)',
+            group: 'Graphics',
+            hint: 'Landscape is drawn this far in tiles; the far clip follows. Players and NPCs only appear as far as the server sends them.',
             options: [
-                { label: 'Near (15)', value: 15 },
-                { label: 'Normal (25)', value: 25 },
-                { label: 'Far (35)', value: 35 },
-                { label: 'Max (45)', value: 45 }
+                { label: 'Near', value: 15 },
+                { label: 'Normal', value: 25 },
+                { label: 'Far', value: 35 },
+                { label: 'Max', value: 45 }
             ],
             getChoice: (): number => ControlBar.settings.drawDist,
             setChoice: (value: number): void => {
@@ -634,10 +535,11 @@ export default class ControlBar {
             label: 'Renderer',
             kind: 'choice',
             tab: TAB_DISPLAY,
-            hint: '(GPU falls back to software if WebGL fails)',
+            group: 'Graphics',
+            hint: 'GPU uses WebGL and falls back to software if init fails.',
             options: [
                 { label: 'Software', value: 0 },
-                { label: 'GPU (WebGL)', value: 1 }
+                { label: 'GPU', value: 1 }
             ],
             // Report what is actually in use, not what was asked for: a failed GL init silently
             // falls back, and the pill must not claim GPU while the software rasterizer is drawing.
@@ -653,7 +555,8 @@ export default class ControlBar {
             label: 'Roofs',
             kind: 'toggle',
             tab: TAB_DISPLAY,
-            hint: '(on is the cache behaviour - a roof is drawn until you walk under it; off never draws above your own floor, so upper storeys and bridges go with it)',
+            group: 'Graphics',
+            hint: 'On is the cache behaviour — a roof is drawn until you walk under it. Off never draws above your own floor, so upper storeys and bridges go with it.',
             get: (): boolean => ControlBar.settings.roofs,
             set: (value: boolean): void => {
                 ControlBar.settings.roofs = value;
@@ -661,12 +564,12 @@ export default class ControlBar {
                 ControlBar.onRoofsChange?.(value);
             }
         });
-
         ControlBar.controls.push({
             id: 'fps',
             label: 'FPS counter',
             kind: 'toggle',
             tab: TAB_DISPLAY,
+            group: 'Debug',
             get: (): boolean => ControlBar.settings.fps,
             set: (value: boolean): void => {
                 ControlBar.settings.fps = value;
@@ -674,32 +577,118 @@ export default class ControlBar {
                 ControlBar.onFpsChange?.(value);
             }
         });
-
         ControlBar.controls.push({
-            id: 'grounditems',
-            label: 'Ground item names',
-            kind: 'toggle',
+            id: 'if3live',
+            label: 'IF3 editor',
+            kind: 'action',
             tab: TAB_DISPLAY,
-            hint: '(a non-stackable drop is one obj per item, so a 9-coal pile draws as a single lump without this)',
-            get: (): boolean => ControlBar.settings.groundItems,
-            set: (value: boolean): void => {
-                ControlBar.settings.groundItems = value;
-                ControlBar.save();
-                ControlBar.onGroundItemsChange?.(value);
-            }
+            group: 'Debug',
+            hint: 'F8 — edits the real widget draw path. Save writes .if3 via :8799, never server/cache/.',
+            run: (): void => If3Live.toggle()
         });
 
         ControlBar.controls.push({
-            id: 'groundmenu',
-            label: 'Grouped pile menu',
-            kind: 'toggle',
-            tab: TAB_DISPLAY,
-            hint: "(one 'Take Coal x 9' line instead of nine 'Take Coal' lines - each click still takes one)",
-            get: (): boolean => ControlBar.settings.groundItemMenu,
-            set: (value: boolean): void => {
-                ControlBar.settings.groundItemMenu = value;
+            id: 'hudsize',
+            label: 'HUD size',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: 'Resizable only. Large fills the screen but an open side panel covers part of the minimap; Fit is the height at which they stop touching.',
+            options: [
+                { label: 'Large', value: HUD_MIN_LARGE },
+                { label: 'Medium', value: HUD_MIN_MEDIUM },
+                { label: 'Fit', value: HUD_MIN_FIT }
+            ],
+            getChoice: (): number => ControlBar.settings.hudMin,
+            setChoice: (value: number): void => {
+                ControlBar.settings.hudMin = value;
                 ControlBar.save();
-                ControlBar.onGroundMenuChange?.(value);
+                ScreenMode.setMinHeight(value);
+            }
+        });
+        ControlBar.controls.push({
+            id: 'hudtrans',
+            label: 'Panels',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: 'Resizable only. Alpha on the panel art, so the world shows through behind chat, tabs and the sidebar. Icons and text stay solid.',
+            options: [
+                { label: 'Solid', value: 0 },
+                { label: 'See-through', value: HUD_TRANS_LIGHT },
+                { label: 'Ghost', value: HUD_TRANS_HEAVY }
+            ],
+            getChoice: (): number => ControlBar.settings.hudTrans,
+            setChoice: (value: number): void => {
+                ControlBar.settings.hudTrans = value;
+                ControlBar.save();
+                ControlBar.applyHudTrans(value);
+            }
+        });
+        ControlBar.controls.push({
+            id: 'sidetabs',
+            label: 'Side tabs',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: 'Resizable only. One column keeps the seven combat and inventory tabs and folds away Friends, Ignore, Logout, Options, Emotes and Music.',
+            options: [
+                { label: 'Two columns', value: 0 },
+                { label: 'One column', value: 1 }
+            ],
+            getChoice: (): number => (ControlBar.settings.oneColumn ? 1 : 0),
+            setChoice: (value: number): void => {
+                ControlBar.settings.oneColumn = value === 1;
+                ControlBar.save();
+                MobileLayout.stonesCollapsed = ControlBar.settings.oneColumn;
+            }
+        });
+        ControlBar.controls.push({
+            id: 'minimalmap',
+            label: 'Minimap',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: 'Resizable only. The bare map circle with a thin ring, instead of the stone frame the fixed layout is built around.',
+            options: [
+                { label: 'Cache art', value: 0 },
+                { label: 'Thin ring', value: 1 }
+            ],
+            getChoice: (): number => (ControlBar.settings.minimalMap ? 1 : 0),
+            setChoice: (value: number): void => {
+                ControlBar.settings.minimalMap = value === 1;
+                ControlBar.save();
+            }
+        });
+        ControlBar.controls.push({
+            id: 'edgemargin',
+            label: 'Edge margin',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: "Resizable only. How much of the phone's side safe area the HUD keeps clear. None pulls the tabs, minimap and hotkeys out to the glass — correct unless the notch is on that side.",
+            options: [
+                { label: 'Full', value: EDGE_FULL },
+                { label: 'Half', value: EDGE_HALF },
+                { label: 'None', value: EDGE_NONE }
+            ],
+            getChoice: (): number => ControlBar.settings.edgeMargin,
+            setChoice: (value: number): void => {
+                ControlBar.settings.edgeMargin = value;
+                ControlBar.save();
+                ScreenMode.setEdgeMargin(value);
+            }
+        });
+        ControlBar.controls.push({
+            id: 'menurows',
+            label: 'Menu rows',
+            kind: 'choice',
+            tab: TAB_HUD,
+            hint: "Right-click menu row height, held constant in real screen pixels. The cache's 15 is about 11pt on a phone.",
+            options: [
+                { label: 'Cache', value: MENU_ROWS_CACHE },
+                { label: 'Large', value: MENU_ROWS_LARGE },
+                { label: 'Huge', value: MENU_ROWS_HUGE }
+            ],
+            getChoice: (): number => ControlBar.settings.menuRows,
+            setChoice: (value: number): void => {
+                ControlBar.settings.menuRows = value;
+                ControlBar.save();
             }
         });
 
@@ -707,8 +696,8 @@ export default class ControlBar {
             id: 'wasd',
             label: 'WASD camera',
             kind: 'toggle',
-            tab: TAB_CAMERA,
-            hint: '(press Enter to switch between typing and WASD)',
+            tab: TAB_GAME,
+            hint: 'Press Enter to switch between typing and WASD.',
             get: (): boolean => ControlBar.settings.wasd,
             set: (value: boolean): void => {
                 ControlBar.settings.wasd = value;
@@ -716,18 +705,42 @@ export default class ControlBar {
                 ControlBar.onWasdChange?.(value);
             }
         });
-
         ControlBar.controls.push({
             id: 'shiftclick',
             label: 'Shift-click',
             kind: 'toggle',
-            tab: TAB_HOTKEYS,
-            group: 'Mouse',
-            hint: '(hold Shift to drop, deposit-all, offer-all or buy the largest amount)',
+            tab: TAB_GAME,
+            hint: 'Hold Shift to drop, deposit-all, offer-all or buy the largest amount.',
             get: (): boolean => ControlBar.settings.shiftClick,
             set: (value: boolean): void => {
                 ControlBar.settings.shiftClick = value;
                 ControlBar.save();
+            }
+        });
+        ControlBar.controls.push({
+            id: 'grounditems',
+            label: 'Item names',
+            kind: 'toggle',
+            tab: TAB_GAME,
+            hint: 'Floating labels over ground piles. A non-stackable drop is one obj per item, so a 9-coal pile draws as a single lump without this.',
+            get: (): boolean => ControlBar.settings.groundItems,
+            set: (value: boolean): void => {
+                ControlBar.settings.groundItems = value;
+                ControlBar.save();
+                ControlBar.onGroundItemsChange?.(value);
+            }
+        });
+        ControlBar.controls.push({
+            id: 'groundmenu',
+            label: 'Pile menu',
+            kind: 'toggle',
+            tab: TAB_GAME,
+            hint: "One 'Take Coal x 9' line instead of nine 'Take Coal' lines. Each click still takes one.",
+            get: (): boolean => ControlBar.settings.groundItemMenu,
+            set: (value: boolean): void => {
+                ControlBar.settings.groundItemMenu = value;
+                ControlBar.save();
+                ControlBar.onGroundMenuChange?.(value);
             }
         });
 
@@ -831,6 +844,10 @@ export default class ControlBar {
         if (root === null) {
             return;
         }
+        // Toggling a pill rebuilds the panel; keep the scrolled page where it was.
+        const prevBody = ControlBar.panel?.querySelector('.cb-body');
+        const prevScroll = prevBody instanceof HTMLElement ? prevBody.scrollTop : 0;
+        const prevTab = ControlBar.panel?.getAttribute('data-tab') ?? '';
         root.textContent = '';
         // The button hangs off the bottom of the frame, and the fit reserves ScreenMode's
         // BUTTON_STRIP for it, so it is always on screen.
@@ -846,9 +863,8 @@ export default class ControlBar {
         // the other two carry rather than the ⚙ character — which is a font, and looked like one
         // beside two pixel icons. The character stays as the fallback and for the labelled form.
         const glyph: string = iconOnly ? HudSkin.glyphUri('ui_settings') : '';
-        root.append(
-            ControlBar.button(label, 'Client settings', () => ControlBar.setOpen(!ControlBar.open), 'cb-open' + (ControlBar.open ? ' cb-open-active' : ''), glyph === '' ? '' : `<img src="${glyph}" width="24" height="24" alt="" aria-hidden="true">`)
-        );
+        const openBtn = ControlBar.button(label, 'Client settings', () => ControlBar.setOpen(!ControlBar.open), 'cb-open' + (ControlBar.open ? ' cb-open-active' : ''), glyph === '' ? '' : `<img src="${glyph}" width="24" height="24" alt="" aria-hidden="true">`);
+        root.append(openBtn);
         if (!ControlBar.open) {
             ControlBar.panel = null;
             return;
@@ -857,6 +873,15 @@ export default class ControlBar {
         const panel = document.createElement('div');
         panel.className = 'cb-panel';
         ControlBar.panel = panel;
+
+        const head = document.createElement('div');
+        head.className = 'cb-head';
+        const headTitle = document.createElement('span');
+        headTitle.className = 'cb-head-title';
+        headTitle.textContent = 'Settings';
+        head.append(headTitle);
+        head.append(ControlBar.button('×', 'Close settings', () => ControlBar.setOpen(false), 'cb-close'));
+        panel.append(head);
 
         // Tab strip, in first-seen order so the registry alone decides the page order.
         const tabNames: string[] = [];
@@ -868,6 +893,7 @@ export default class ControlBar {
         if (!tabNames.includes(ControlBar.activeTab)) {
             ControlBar.activeTab = tabNames[0] ?? TAB_DISPLAY;
         }
+        panel.setAttribute('data-tab', ControlBar.activeTab);
         const tabStrip = document.createElement('div');
         tabStrip.className = 'cb-tabs';
         for (const name of tabNames) {
@@ -890,102 +916,152 @@ export default class ControlBar {
         body.className = 'cb-body';
         panel.append(body);
 
-        // Rendered straight from the registry: consecutive controls of the active tab sharing a
-        // `group` become one titled section. Sections are flex rows that wrap, so the panel can
-        // never overflow its width.
-        let span: HTMLElement | null = null;
+        // One labelled row per control. A `group` is a heading above a run of rows, except
+        // keybinds which still wrap as a chip grid (the chip already carries the tab name).
         let groupName: string | undefined;
-        let first: boolean = true;
+        let keyWrap: HTMLElement | null = null;
         for (const control of ControlBar.controls) {
             if (control.tab !== ControlBar.activeTab) {
                 continue;
             }
-            if (span === null || control.group !== groupName || control.group === undefined) {
-                const section = document.createElement('div');
-                section.className = 'cb-section';
+            if (control.group !== groupName) {
                 groupName = control.group;
-                if (!first) {
-                    section.classList.add('cb-section-ruled');
+                keyWrap = null;
+                if (groupName !== undefined) {
+                    const heading = document.createElement('div');
+                    heading.className = 'cb-group';
+                    heading.textContent = groupName;
+                    body.append(heading);
                 }
-                first = false;
-                const title = document.createElement('span');
-                title.className = 'cb-title';
-                title.textContent = groupName ?? control.label;
-                section.append(title);
-
-                span = document.createElement('span');
-                span.className = 'cb-items';
-                section.append(span);
-                body.append(section);
             }
-            if (control.kind === 'toggle') {
-                const on = control.get?.() === true;
-                span.append(
-                    ControlBar.button(
-                        on ? 'ON' : 'OFF',
-                        'Toggle ' + control.label,
-                        () => {
-                            control.set?.(!on);
-                            ControlBar.render();
-                            ControlBar.focusGame();
-                        },
-                        'cb-toggle ' + (on ? 'cb-on' : 'cb-off')
-                    )
-                );
-            } else if (control.kind === 'choice') {
-                const selected = control.getChoice?.() ?? -1;
-                for (const option of control.options ?? []) {
-                    span.append(
-                        ControlBar.button(
-                            option.label,
-                            control.label + ': ' + option.label,
-                            () => {
-                                control.setChoice?.(option.value);
-                                ControlBar.render();
-                                ControlBar.focusGame();
-                            },
-                            'cb-choice' + (option.value === selected ? ' cb-choice-active' : '')
-                        )
-                    );
+            if (control.kind === 'keybind') {
+                if (keyWrap === null) {
+                    keyWrap = document.createElement('div');
+                    keyWrap.className = 'cb-keys';
+                    body.append(keyWrap);
                 }
-            } else if (control.kind === 'keybind') {
-                const tab = control.tabIndex ?? -1;
-                const capturing = ControlBar.capturing === tab;
-                const bound = capturing ? '?' : ControlBar.keyLabelForTab(tab);
-                span.append(
-                    ControlBar.keyButton(
-                        bound,
-                        control.label,
-                        capturing ? 'Press a key to bind ' + control.label + ' (Esc cancels, Backspace unbinds)' : 'Click to rebind ' + control.label,
-                        () => {
-                            ControlBar.beginCapture(tab);
-                        },
-                        capturing
-                    )
-                );
-            } else if (control.kind === 'action') {
-                span.append(
-                    ControlBar.button(
-                        control.label,
-                        control.label,
-                        () => {
-                            control.run?.();
-                            ControlBar.render();
-                            ControlBar.focusGame();
-                        },
-                        'cb-action'
-                    )
-                );
+                ControlBar.appendControl(keyWrap, control);
+                continue;
             }
+            if (control.kind === 'action' && keyWrap !== null && control.group === groupName) {
+                ControlBar.appendControl(keyWrap, control);
+                continue;
+            }
+            const row = document.createElement('div');
+            row.className = 'cb-section';
             if (control.hint !== undefined) {
-                const hint = document.createElement('span');
-                hint.className = 'cb-hint';
-                hint.textContent = ' ' + control.hint;
-                span.append(hint);
+                row.title = control.hint;
             }
+            const title = document.createElement('span');
+            title.className = 'cb-title';
+            title.textContent = control.label;
+            row.append(title);
+            const items = document.createElement('span');
+            items.className = 'cb-items';
+            ControlBar.appendControl(items, control, true);
+            row.append(items);
+            body.append(row);
         }
         root.append(panel);
+        body.scrollTop = prevTab === ControlBar.activeTab ? prevScroll : 0;
+        ControlBar.pinPanel(panel, openBtn);
     }
+
+    /** Put the control's widgets into `into` — pills, a keycap, or an action button. */
+    private static appendControl(into: HTMLElement, control: Control, rowLabelled: boolean = false): void {
+        if (control.kind === 'toggle') {
+            const on = control.get?.() === true;
+            into.append(
+                ControlBar.button(
+                    on ? 'ON' : 'OFF',
+                    'Toggle ' + control.label,
+                    () => {
+                        control.set?.(!on);
+                        ControlBar.render();
+                        ControlBar.focusGame();
+                    },
+                    'cb-toggle ' + (on ? 'cb-on' : 'cb-off')
+                )
+            );
+            return;
+        }
+        if (control.kind === 'choice') {
+            const selected = control.getChoice?.() ?? -1;
+            for (const option of control.options ?? []) {
+                into.append(
+                    ControlBar.button(
+                        option.label,
+                        control.label + ': ' + option.label,
+                        () => {
+                            control.setChoice?.(option.value);
+                            ControlBar.render();
+                            ControlBar.focusGame();
+                        },
+                        'cb-choice' + (option.value === selected ? ' cb-choice-active' : '')
+                    )
+                );
+            }
+            return;
+        }
+        if (control.kind === 'keybind') {
+            const tab = control.tabIndex ?? -1;
+            const capturing = ControlBar.capturing === tab;
+            const bound = capturing ? '?' : ControlBar.keyLabelForTab(tab);
+            into.append(
+                ControlBar.keyButton(
+                    bound,
+                    control.label,
+                    capturing ? 'Press a key to bind ' + control.label + ' (Esc cancels, Backspace unbinds)' : 'Click to rebind ' + control.label,
+                    () => {
+                        ControlBar.beginCapture(tab);
+                    },
+                    capturing
+                )
+            );
+            return;
+        }
+        into.append(
+            ControlBar.button(
+                rowLabelled ? 'Open' : control.label,
+                control.hint ?? control.label,
+                () => {
+                    control.run?.();
+                    ControlBar.render();
+                    ControlBar.focusGame();
+                },
+                'cb-action'
+            )
+        );
+    }
+
+    /**
+     * Cap the panel to the space actually on screen in the direction it opens, so a long page
+     * never runs off the window. The body (not the panel) is what scrolls; the header and tabs
+     * stay put. Absolute positioning does not contribute to document height, so without this
+     * there is nothing to scroll and the top rows are simply gone.
+     */
+    private static pinPanel(panel: HTMLElement, button: HTMLElement): void {
+        const vh = globalThis.innerHeight ?? 0;
+        if (vh <= 0) {
+            return;
+        }
+        const fill = document.body?.getAttribute('data-layout') === 'fill';
+        // Fill mode is a centred overlay pinned from the top of the window (the gear lives at
+        // the bottom of the left-edge stack). Windowed opens upward from the gear, so the
+        // space that exists is between the button and the top of the viewport.
+        const available = fill ? vh - panel.getBoundingClientRect().top - 12 : button.getBoundingClientRect().top - 8;
+        panel.style.maxHeight = Math.max(160, Math.min(available, vh - 16)) + 'px';
+    }
+
+    private static readonly onWinResize = (): void => {
+        if (ControlBar.panel === null || ControlBar.root === null) {
+            return;
+        }
+        const btn = ControlBar.root.querySelector('.cb-open');
+        if (btn instanceof HTMLElement) {
+            ControlBar.pinPanel(ControlBar.panel, btn);
+        }
+    };
 
     private static keyLabelForTab(tab: number): string {
         for (const [code, value] of ControlBar.keyToTab) {
@@ -1105,6 +1181,7 @@ export default class ControlBar {
         // and a pending rebind is abandoned the same way.
         if (typeof document !== 'undefined') {
             document.addEventListener('mousedown', ControlBar.cancelHandler, true);
+            globalThis.addEventListener('resize', ControlBar.onWinResize);
         }
     }
 }

@@ -47,14 +47,28 @@ screen whatever the window height. The fit reserves `ScreenMode.BUTTON_STRIP` fo
 pushed off the bottom — which is why the placement no longer has to be decided at runtime.
 
 The panel is rendered from the `ControlBar.controls` registry, never hardcoded. A control declares
-its `tab` (Display / Camera / Hotkeys) and its `kind`:
+its `tab` and its `kind`:
 
 - `toggle` — ON/OFF pill
 - `choice` — a row of mutually exclusive options, selected one lit
 - `keybind` — a keycap that rebinds on click
 - `action` — a plain button
 
+Four pages, in registry order:
+
+| Tab | What lives there |
+|---|---|
+| **Display** | Layout, graphics (3D detail, draw distance, renderer, roofs), debug (FPS, IF3 editor) |
+| **HUD** | Resizable-layout chrome: HUD size, panel alpha, side tabs, minimap, edge margin, menu rows |
+| **Game** | WASD camera, shift-click, ground-item names, grouped pile menu |
+| **Hotkeys** | Side-tab keybinds |
+
 Adding a control is one `ControlBar.controls.push({...})`; a new `tab` string creates a new page.
+A control's `hint` is a tooltip on the row, not a paragraph — the page is one labelled row per
+setting. The panel body (`.cb-body`) is the scroller; the header and tab strip stay put.
+`ControlBar.pinPanel` caps the panel to the space actually on screen so a long page cannot run off
+the window. Absolute positioning does not contribute to document height, so without that cap there
+is nothing to scroll and the top rows are simply gone.
 
 The Display tab also owns the **Draw distance** choice (Near 15 / Normal 25 / Far 35 / Max 45),
 which is `World.visibilityRadius` — the tile radius the scene builds around the player. The two

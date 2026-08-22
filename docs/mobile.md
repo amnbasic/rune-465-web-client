@@ -820,11 +820,12 @@ The windowed (fitted) layout keeps the flat panel styling and a row under the fr
 sits on the page rather than on the world.
 
 The settings panel goes `position:fixed` and centres on the **window** in fill mode, opening
-downward from the gear: anchored to a corner, a 420px panel runs off the edge on any phone held
-upright. On a coarse pointer it is additionally pinned to the viewport with `max-height` cut to the
-window minus the safe-area insets and `overflow-y:auto`, because `body` has `overflow:hidden` — a
-panel taller than the window had no scrollbar and no page to scroll, so its upper rows were simply
-unreachable.
+downward from the top of the window: anchored to a corner, a 400px panel runs off the edge on any
+phone held upright. On a coarse pointer it is additionally pinned to the viewport with `max-height`
+cut to the window minus the safe-area insets. The body of the panel (`.cb-body`) is what scrolls —
+header and tabs stay put — because `body` has `overflow:hidden` and an absolutely-positioned panel
+does not contribute to document height. Without that, a panel taller than the window had no
+scrollbar and no page to scroll, so its upper rows were simply unreachable.
 
 **`::layout` in the chatbox toggles fixed/resizable**, and it exists because that was not a
 hypothetical: in the fixed layout the gear sits near the bottom, the panel opened upward off the top
