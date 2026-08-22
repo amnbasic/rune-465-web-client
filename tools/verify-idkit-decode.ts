@@ -1,9 +1,7 @@
-// Headless verification of the IDKit (body-part) decode fix.
+// Headless verification of native 465 IdkType (idx2 group 3).
 //   bun run tools/verify-idkit-decode.ts
 //
-// The 464 server re-encodes 465 idkit into NpcType binary (op1=models, op12=type, op40=recol,
-// op60=head). Decodes real body parts (config archive 2, group 3) the NEW way and checks the
-// model ids are sane (valid, not garbage), vs the OLD rev-500 idkit reading (op1=type, op2=models).
+// op1=type u8, op2=models count+u16, op40=count+pairs, op60-69=per-index head.
 import net from 'node:net';
 import zlib from 'node:zlib';
 
@@ -124,8 +122,7 @@ function fileIdLimitFor(container: Buffer, wantGroup: number): number {
     }
     return fileIdLimit[wantGroup] ?? 0;
 }
-// NEW decode (NpcType format): op1=models, op12=type, op40=recol, op60=head. Returns {type, models}.
-function decodeIdkNew(idk: Buffer): { type: number; models: number[] } | null {
+function decodeIdkNative(idk: Buffer): { type: number; models: number[] } | null {
     let pos = 0;
     let type = -1;
     let models: number[] = [];
@@ -134,22 +131,21 @@ function decodeIdkNew(idk: Buffer): { type: number; models: number[] } | null {
             const code = idk[pos++];
             if (code === 0) break;
             if (code === 1) {
+                type = idk[pos++];
+            } else if (code === 2) {
                 const n = idk[pos++];
                 for (let i = 0; i < n; i++) {
                     models.push(idk.readUInt16BE(pos));
                     pos += 2;
                 }
-            } else if (code === 12) {
-                type = idk[pos++];
             } else if (code === 3) {
                 /* disable */
             } else if (code === 40) {
                 const n = idk[pos++];
                 pos += n * 4;
-            } else if (code === 60) {
-                const n = idk[pos++];
-                pos += n * 2;
-            } else return null; // unknown opcode -> mis-decode
+            } else if (code >= 60 && code < 70) {
+                pos += 2;
+            } else return null;
         }
     } catch {
         return null;
@@ -170,22 +166,40 @@ sock.on('connect', async () => {
     buf = buf.subarray(1);
     console.log('[verify] JS5 OK; fetching config ref-table (255:2)...');
     const nFiles = fileIdLimitFor(await fetchContainer(255, CONFIG_ARCHIVE), IDK_GROUP);
-    console.log(`[verify] config group 3 (idkit) has ${nFiles} body parts. Decoding first 12 with the NEW format:`);
+    console.log(`[verify] config group 3 (idkit) has ${nFiles} body parts.`);
+    if (nFiles !== 84) {
+        console.log(`[verify] FAIL: group 3 fileIdLimit=${nFiles}, want 84`);
+        process.exit(1);
+    }
     const files = splitGroup(decompress(await fetchContainer(CONFIG_ARCHIVE, IDK_GROUP)), nFiles);
     let ok = 0;
-    for (let f = 0; f < Math.min(12, files.length); f++) {
+    let failed = 0;
+    for (let f = 0; f < files.length; f++) {
         if (files[f].length === 0) continue;
-        const dec = decodeIdkNew(files[f]);
+        const dec = decodeIdkNative(files[f]);
         if (dec === null) {
             console.log(`  idk ${f}: DECODE FAILED (unknown opcode / overrun)`);
+            failed++;
             continue;
         }
         const saneModels = dec.models.length > 0 && dec.models.every(m => m >= 0 && m < 100000);
-        const saneType = dec.type >= 0 && dec.type < 20;
+        const saneType = dec.type >= 0 && dec.type <= 13;
         if (saneModels && saneType) ok++;
-        console.log(`  idk ${String(f).padStart(3)}: type=${dec.type} models=[${dec.models.join(',')}] ${saneModels && saneType ? '✓' : '✗'}`);
+        else {
+            console.log(`  idk ${String(f).padStart(3)}: type=${dec.type} models=[${dec.models.join(',')}] ✗`);
+            failed++;
+        }
     }
-    console.log(`\n[verify] ${ok}/${Math.min(12, files.length)} body parts decode sane (valid type + model ids) with the NEW (NpcType) format.`);
+    const kit0 = decodeIdkNative(files[0]);
+    if (!kit0 || kit0.type !== 0 || kit0.models[0] !== 230) {
+        console.log(`[verify] FAIL kit 0 type=${kit0?.type} model=${kit0?.models[0]}`);
+        failed++;
+    }
+    if (failed || ok !== 84) {
+        console.log(`[verify] FAIL native idk (ok=${ok} failed=${failed})`);
+        process.exit(1);
+    }
+    console.log(`[verify] OK: 84 IdkType @ group 3; kit 0 type=0 model=230`);
     clearTimeout(killer);
     sock.end();
     process.exit(0);

@@ -78,15 +78,13 @@ export default class NpcType extends Linkable2 {
         NpcType.models = models;
     }
 
-    // This 464 server serves NPC entity configs as flat files in config group 7 (re-encoded to
-    // LocType binary), file = npc id. getFile(a,b) reads unpacked[b][a], so the FILE is id and the
-    // GROUP is 7. (rev-500 used nested addressing id&0x7f / id>>>7 — wrong group entirely here.)
+    // 465: NPCs are a flat group in idx2 (stock group 9). getFile(file=id, group=9).
     static getGroupId(id: number): number {
         return id;
     }
 
     static getFileId(id: number): number {
-        return 7;
+        return 9;
     }
 
     // jag::oldscape::configdecoder::NpcType::List
@@ -122,13 +120,8 @@ export default class NpcType extends Linkable2 {
 
     // jag::oldscape::configdecoder::NpcType::Decode
     decodeInner(code: number, buf: Packet): void {
-        // This 464 server serves NPC entities as LocType binary (js5-update-server.ts
-        // convertNpcEntries) — the 464 client renders every NPC via the LocType path. So NPC configs
-        // use LOCTYPE opcodes, NOT NpcType opcodes. Handle exactly the opcodes the server writes
-        // (5,2,14,24,28,29,30-34,40,64,65,66,68,73,79,80) or the stream desyncs. (rev-500 read
-        // NpcType opcodes 1/12/13-17/... against this LocType data -> garbage -> no NPC.)
-        if (code === 5) {
-            // models (u8 count + u16 each, no shape byte)
+        // Native 465 NpcType (stock idx2 group 9). Not LocType costume.
+        if (code === 1) {
             const count = buf.g1();
             this.model = new Int32Array(count);
             for (let i = 0; i < count; i++) {
@@ -136,47 +129,23 @@ export default class NpcType extends Linkable2 {
             }
         } else if (code === 2) {
             this.name = buf.gjstr();
-        } else if (code === 14) {
+        } else if (code === 12) {
             this.size = buf.g1();
-        } else if (code === 24) {
+        } else if (code === 13) {
             this.readyanim = buf.g2();
             if (this.readyanim === 65535) {
                 this.readyanim = -1;
             }
-        } else if (code === 28) {
-            this.turnspeed = buf.g1();
-        } else if (code === 29) {
-            this.ambient = buf.g1b();
-        } else if (code === 64) {
-            // not clickable — no data
-        } else if (code === 65) {
-            this.resizeh = buf.g2();
-        } else if (code === 66) {
-            this.resizev = buf.g2();
-        } else if (code === 68) {
-            this.vislevel = buf.g2();
-        } else if (code === 73) {
-            // visible on minimap — no data
-        } else if (code === 79) {
-            // head models: u16, u16, u8 (all unused), then u8 count + u16 each
+        } else if (code === 14) {
+            this.walkanim = buf.g2();
+            if (this.walkanim === 65535) {
+                this.walkanim = -1;
+            }
+        } else if (code === 15) {
             buf.g2();
+        } else if (code === 16) {
             buf.g2();
-            buf.g1();
-            const headCount = buf.g1();
-            this.head = new Int32Array(headCount);
-            for (let i = 0; i < headCount; i++) {
-                this.head[i] = buf.g2();
-            }
-        } else if (code === 80) {
-            // walk/turn anims (6 × u16): turnLeft, turnRight, walkForward, walkBackward, walkLeft, walkRight
-            this.turnleftanim = buf.g2();
-            if (this.turnleftanim === 65535) {
-                this.turnleftanim = -1;
-            }
-            this.turnrightanim = buf.g2();
-            if (this.turnrightanim === 65535) {
-                this.turnrightanim = -1;
-            }
+        } else if (code === 17) {
             this.walkanim = buf.g2();
             if (this.walkanim === 65535) {
                 this.walkanim = -1;
@@ -274,21 +243,17 @@ export default class NpcType extends Linkable2 {
         } else if (code === 109) {
             this.walksmoothing = false;
         } else if (code === 111) {
-            // spotshadow
+            // 0 hits in this cache
         } else if (code === 113) {
-            // spotshadowcolour
             buf.g2();
             buf.g2();
         } else if (code === 114) {
-            // spotshadowtrans
             buf.g1b();
             buf.g1b();
         } else if (code === 115) {
-            // shadow related?
             this.field2350 = buf.g1() * 4;
             this.field2329 = buf.g1() * 4;
         } else if (code === 119) {
-            // walkflags
             buf.g1b();
         } else if (code === 249) {
             const var7 = buf.g1();

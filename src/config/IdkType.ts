@@ -66,20 +66,15 @@ export default class IdkType extends Linkable2 {
 
     // jag::oldscape::configdecoder::IdkType::Decode
     decodeInner(buf: Packet, code: number): void {
-        // This 464 server re-encodes 465 IDKit body parts into NpcType binary format
-        // (js5-update-server.ts convertIdkitBinaryToNpcType), which the 464 Java client reads with
-        // the NpcType decoder. Opcodes: 1 = models (u8 count + u16 each), 12 = bodyPartType (u8),
-        // 40 = recolour pairs (u8 count + (u16 src, u16 dst)), 60 = head models (u8 count + u16 each).
-        // (rev-500 idkit was op1=type / op2=models / op40+41=retex+recol / op60-69=per-index head —
-        // reading that against this data gave garbage model ids -> empty body -> no player model.)
+        // Native 465 IdkType (stock idx2 group 3).
         if (code === 1) {
+            this.type = buf.g1();
+        } else if (code === 2) {
             const count = buf.g1();
             this.model = new Int32Array(count);
             for (let i = 0; i < count; i++) {
                 this.model[i] = buf.g2();
             }
-        } else if (code === 12) {
-            this.type = buf.g1();
         } else if (code === 3) {
             this.disable = true;
         } else if (code === 40) {
@@ -90,14 +85,8 @@ export default class IdkType extends Linkable2 {
                 this.recol_s[i] = buf.g2();
                 this.recol_d[i] = buf.g2();
             }
-        } else if (code === 60) {
-            const count = buf.g1();
-            for (let i = 0; i < count; i++) {
-                const headModel = buf.g2();
-                if (i < this.head.length) {
-                    this.head[i] = headModel;
-                }
-            }
+        } else if (code >= 60 && code < 70) {
+            this.head[code - 60] = buf.g2();
         }
     }
 
@@ -130,15 +119,15 @@ export default class IdkType extends Linkable2 {
             built = new ModelUnlit(models, models.length);
         }
 
-        if (this.retex_d !== null) {
-            for (let i = 0; i < this.retex_d.length; i++) {
-                built!.recolour(this.retex_d[i], this.recol_d![i]);
+        if (this.recol_s !== null) {
+            for (let i = 0; i < this.recol_s.length; i++) {
+                built!.recolour(this.recol_s[i], this.recol_d![i]);
             }
         }
 
         if (this.retex_s !== null) {
             for (let i = 0; i < this.retex_s.length; i++) {
-                built!.retexture(this.retex_s[i], this.recol_s![i]);
+                built!.retexture(this.retex_s[i], this.retex_d![i]);
             }
         }
 
@@ -172,15 +161,15 @@ export default class IdkType extends Linkable2 {
 
         const built = new ModelUnlit(models, count);
 
-        if (this.retex_d !== null) {
-            for (let i = 0; i < this.retex_d.length; i++) {
-                built.recolour(this.retex_d[i], this.recol_d![i]);
+        if (this.recol_s !== null) {
+            for (let i = 0; i < this.recol_s.length; i++) {
+                built.recolour(this.recol_s[i], this.recol_d![i]);
             }
         }
 
         if (this.retex_s !== null) {
             for (let i = 0; i < this.retex_s.length; i++) {
-                built.retexture(this.retex_s[i], this.recol_s![i]);
+                built.retexture(this.retex_s[i], this.retex_d![i]);
             }
         }
 

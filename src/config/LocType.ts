@@ -110,13 +110,13 @@ export default class LocType extends Linkable2 {
         LocType.modelCacheDynamic = new ModelSourceCache(30);
     }
 
-    // 465: locs are a flat group in idx2 (group 9, as the server serves it). getFile(file=id, group=9).
+    // 465: locs are a flat group in idx2 (stock group 6). getFile(file=id, group=6).
     static getGroupId(id: number): number {
         return id;
     }
 
     static getFileId(id: number): number {
-        return 9;
+        return 6;
     }
 
     // jag::oldscape::configdecoder::LocType::List
