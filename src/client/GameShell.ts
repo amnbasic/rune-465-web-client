@@ -431,7 +431,21 @@ export default abstract class GameShell {
     // custom
     public getParameter(name: string): string | null {
         try {
-            return new URL(globalThis.location?.href ?? 'http://localhost/').searchParams.get(name);
+            const url = new URL(globalThis.location?.href ?? 'http://localhost/');
+            const fromQuery = url.searchParams.get(name);
+            if (fromQuery !== null) {
+                return fromQuery;
+            }
+            const path = url.pathname;
+            const worldid = /(?:[?&]worldid=|\/worldid=)(\d+)/.exec(path + url.search);
+            const members = /(?:[?&]members=|\/members=)([01])/.exec(path + url.search);
+            if (name === 'worldid' && worldid) {
+                return worldid[1];
+            }
+            if (name === 'members' && members) {
+                return members[1];
+            }
+            return null;
         } catch {
             return null;
         }

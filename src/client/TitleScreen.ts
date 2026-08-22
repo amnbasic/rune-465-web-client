@@ -4,6 +4,8 @@ import ClientMouseListener from '#/client/ClientMouseListener.js';
 import GameShell from '#/client/GameShell.js';
 import HTTPRequest from '#/client/HTTPRequest.js';
 import WorldEntry from '#/client/WorldEntry.js';
+import LocType from '#/config/LocType.js';
+import ObjType from '#/config/ObjType.js';
 import Text from '#/constants/Text.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix8 from '#/graphics/Pix8.js';
@@ -632,22 +634,22 @@ export default class TitleScreen {
         }
         if (TitleScreen.slLastWorld !== -1) {
             const world = TitleScreen.list![TitleScreen.slLastWorld];
-            if (Client.memServer === world.members) {
-                Client.loginHost = world.host!;
-                Client.worldid = world.id;
-                if (Client.modewhere !== 0) {
-                    Client.modewhere = 0;
-                }
-                TitleScreen.switchScreen = false;
-                TitleScreen.drawBack();
-            } else {
-                // switching between f2p/p2p loads the selected world directly
-                const lang = Client.lang;
-                const plug = Client.plug;
-                const js = Client.js;
-                const site = `${window.location.protocol}//${world.host}/l=${lang}/l${Client.lowMem ? 1 : 0},p${plug},j${js}`;
-                globalThis.location.href = site;
+            // Java applet reloaded on members change. This web client stays on the
+            // same page: title button and loginHost update, no browser navigation.
+            Client.loginHost = world.host!;
+            Client.worldid = world.id;
+            if (Client.memServer !== world.members) {
+                Client.memServer = world.members;
+                ObjType.memServer = world.members;
+                LocType.memServer = world.members;
+                ObjType.resetCache();
+                LocType.resetCache();
             }
+            if (Client.modewhere !== 0) {
+                Client.modewhere = 0;
+            }
+            TitleScreen.switchScreen = false;
+            TitleScreen.drawBack();
         }
     }
 

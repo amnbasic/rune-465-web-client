@@ -16,11 +16,15 @@ import { resolve, sep } from 'node:path';
 // to go back to loopback-only.
 const listenHost = Bun.env.LISTEN_HOST ?? '0.0.0.0';
 const listenPort = readPort('LISTEN_PORT', 8080);
+// World 2 origin. Set LISTEN_PORT_2=0 to disable. Default 8081 so a bare
+// `bun proxy.ts` still accepts the slr2 host jagstr.
+const listenPort2 = Bun.env.LISTEN_PORT_2 === '0' ? null : readPort('LISTEN_PORT_2', 8081);
 const upstreamHost = Bun.env.UPSTREAM_HOST ?? '127.0.0.1';
 const httpUpstreamHost = Bun.env.HTTP_UPSTREAM_HOST ?? upstreamHost;
 const httpUpstreamPort = readPort('HTTP_UPSTREAM_PORT', 80);
 const tcpUpstreamHost = Bun.env.TCP_UPSTREAM_HOST ?? upstreamHost;
 const tcpUpstreamPort = readPort('TCP_UPSTREAM_PORT', 43594);
+const tcpUpstreamPort2 = readPort('TCP_UPSTREAM_PORT_2', 43596);
 const publicRoot = resolve(import.meta.dir, 'public');
 
 type WsMessage = string | Uint8Array | ArrayBuffer;
@@ -29,6 +33,7 @@ type WebSocketData = {
     tcp?: Bun.Socket<TcpData>;
     queue: WsMessage[];
     closing: boolean;
+    tcpPort: number;
 };
 
 type TcpData = {
@@ -53,10 +58,11 @@ function isWebSocketRequest(req: Request): boolean {
     return req.headers.get('upgrade')?.toLowerCase() === 'websocket';
 }
 
-function createWebSocketData(): WebSocketData {
+function createWebSocketData(tcpPort: number): WebSocketData {
     return {
         queue: [],
-        closing: false
+        closing: false,
+        tcpPort
     };
 }
 
@@ -94,7 +100,7 @@ async function openTcpConnection(ws: ServerWebSocket<WebSocketData>): Promise<vo
     try {
         const tcp = await Bun.connect<TcpData>({
             hostname: tcpUpstreamHost,
-            port: tcpUpstreamPort,
+            port: ws.data.tcpPort,
             data: { ws },
             socket: {
                 binaryType: 'buffer',
@@ -143,6 +149,47 @@ async function openTcpConnection(ws: ServerWebSocket<WebSocketData>): Promise<vo
     }
 }
 
+const if3EditorPort = readPort('IF3_EDITOR_PORT', 8799);
+const if3EditorHost = Bun.env.IF3_EDITOR_HOST ?? '127.0.0.1';
+
+/** /if3 and /if3/ open the client studio (drawLayer editor). /if3/api/* still hits :8799. */
+async function proxyIf3Editor(req: Request): Promise<Response | undefined> {
+    const url = new URL(req.url);
+    if (req.method === 'GET' && (url.pathname === '/if3' || url.pathname === '/if3/')) {
+        return Response.redirect(new URL('/studio', url.origin).toString(), 302);
+    }
+    if (!url.pathname.startsWith('/if3/')) {
+        return undefined;
+    }
+
+    const rest = url.pathname.slice('/if3'.length) || '/';
+    const target = `http://${if3EditorHost}:${if3EditorPort}${rest}${url.search}`;
+    const headers = new Headers(req.headers);
+    headers.set('host', `${if3EditorHost}:${if3EditorPort}`);
+    headers.delete('connection');
+    headers.delete('upgrade');
+
+    try {
+        const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await req.arrayBuffer();
+        const upstream = await fetch(target, {
+            method: req.method,
+            headers,
+            body,
+            redirect: 'manual'
+        });
+        const outHeaders = new Headers(upstream.headers);
+        return new Response(req.method === 'HEAD' ? undefined : upstream.body, {
+            status: upstream.status,
+            headers: outHeaders
+        });
+    } catch {
+        return new Response(
+            'IF3 editor is not running.\nIn the game server repo:  cd server ; bun tools/if3-editor.ts\n',
+            { status: 502, headers: { 'content-type': 'text/plain; charset=utf-8' } }
+        );
+    }
+}
+
 async function proxyHttp(req: Request): Promise<Response> {
     const sourceUrl = new URL(req.url);
     const targetUrl = new URL(`${sourceUrl.pathname}${sourceUrl.search}`, `http://${httpUpstreamHost}:${httpUpstreamPort}`);
@@ -160,46 +207,48 @@ async function proxyHttp(req: Request): Promise<Response> {
     });
 }
 
-function serveServerList(req: Request): Response | undefined {
+/**
+ * Title-screen list is owned by the game HTTP encoder (worlds.json → slr2).
+ * This client fetches page origin, so we forward /l=<world>/slr2.ws and do not
+ * keep a second hardcoded list here.
+ */
+async function proxyServerList(req: Request): Promise<Response | undefined> {
     const url = new URL(req.url);
     if ((req.method !== 'GET' && req.method !== 'HEAD') || !/^\/l=\d+\/slr2\.ws$/.test(url.pathname)) {
         return undefined;
     }
 
-    const host = url.host;
-    const payload = new Uint8Array(2 + 2 + host.length + 1 + 2 + 2);
-    let pos = 0;
-    const p2 = (value: number): void => {
-        payload[pos++] = value >> 8;
-        payload[pos++] = value;
-    };
+    const targetUrl = new URL(`${url.pathname}${url.search}`, `http://${httpUpstreamHost}:${httpUpstreamPort}`);
+    const headers = new Headers(req.headers);
+    headers.set('x-forwarded-host', url.host);
+    headers.set('host', url.host);
+    headers.delete('connection');
+    headers.delete('upgrade');
 
-    p2(1);
-    p2(0x8001);
-    for (let i = 0; i < host.length; i++) {
-        payload[pos++] = host.charCodeAt(i);
+    const upstream = await fetch(targetUrl, {
+        method: req.method,
+        headers,
+        redirect: 'manual'
+    });
+
+    const outHeaders = new Headers(upstream.headers);
+    outHeaders.set('cache-control', 'no-store');
+    if (!outHeaders.has('content-type')) {
+        outHeaders.set('content-type', 'application/octet-stream');
     }
-    payload[pos++] = 0;
-    p2(0);
-    p2(0);
 
-    const data = new Uint8Array(4 + payload.length);
-    data[0] = payload.length >> 24;
-    data[1] = payload.length >> 16;
-    data[2] = payload.length >> 8;
-    data[3] = payload.length;
-    data.set(payload, 4);
-
-    return new Response(req.method === 'HEAD' ? undefined : data, {
-        headers: {
-            'cache-control': 'no-store',
-            'content-type': 'application/octet-stream'
-        }
+    return new Response(req.method === 'HEAD' ? undefined : upstream.body, {
+        status: upstream.status,
+        headers: outHeaders
     });
 }
 
 function isWorldClientPath(pathname: string): boolean {
     return /^\/l=\d+\/[^/]+$/.test(pathname) && !pathname.endsWith('.ws');
+}
+
+function isStudioClientPath(pathname: string): boolean {
+    return pathname === '/studio' || pathname === '/studio/';
 }
 
 async function serveStatic(req: Request): Promise<Response | undefined> {
@@ -220,6 +269,9 @@ async function serveStatic(req: Request): Promise<Response | undefined> {
 
     if (isWorldClientPath(pathname)) {
         pathname = '/';
+    }
+    if (isStudioClientPath(pathname)) {
+        pathname = '/studio.html';
     }
 
     let filePath = resolve(publicRoot, `.${pathname}`);
@@ -252,7 +304,7 @@ async function serveStatic(req: Request): Promise<Response | undefined> {
             // Synthetic server-list documents: always fresh, never stored.
             headers['content-type'] = 'text/html; charset=utf-8';
             headers['cache-control'] = 'no-store';
-        } else if (lower.endsWith('index.html')) {
+        } else if (lower.endsWith('index.html') || lower.endsWith('studio.html')) {
             // The entry document. Tiny, and the one thing that must never be stale.
             headers['cache-control'] = 'no-store';
         } else {
@@ -279,12 +331,10 @@ async function serveStatic(req: Request): Promise<Response | undefined> {
     }
 }
 
-let server: Bun.Server;
-
-try {
-    server = Bun.serve({
+function listenProxy(bindPort: number, tcpPort: number): Bun.Server {
+    return Bun.serve({
         hostname: listenHost,
-        port: listenPort,
+        port: bindPort,
         async fetch(req, server) {
             if (isWebSocketRequest(req)) {
                 const url = new URL(req.url);
@@ -292,7 +342,12 @@ try {
                     return new Response('WebSocket proxy only supports /', { status: 404 });
                 }
 
-                return server.upgrade(req, { data: createWebSocketData() }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
+                return server.upgrade(req, { data: createWebSocketData(tcpPort) }) ? undefined : new Response('WebSocket upgrade failed', { status: 400 });
+            }
+
+            const if3Response = await proxyIf3Editor(req);
+            if (if3Response) {
+                return if3Response;
             }
 
             // DEV: client streams its console/errors here so logs survive a browser crash. -> dbg.log
@@ -306,7 +361,7 @@ try {
             }
 
             try {
-                const serverListResponse = serveServerList(req);
+                const serverListResponse = await proxyServerList(req);
                 if (serverListResponse) {
                     return serverListResponse;
                 }
@@ -340,10 +395,23 @@ try {
             }
         }
     });
+}
+
+let server: Bun.Server;
+let server2: Bun.Server | undefined;
+
+try {
+    server = listenProxy(listenPort, tcpUpstreamPort);
+    if (listenPort2 !== null) {
+        server2 = listenProxy(listenPort2, tcpUpstreamPort2);
+    }
 } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Failed to start: ${message}`);
     process.exit(1);
 }
 
-console.log(`proxy listening on http://${server.hostname}:${server.port} ` + `(HTTP -> ${httpUpstreamHost}:${httpUpstreamPort}, WS / -> ${tcpUpstreamHost}:${tcpUpstreamPort})`);
+console.log(`proxy listening on http://${server.hostname}:${server.port} ` + `(HTTP -> ${httpUpstreamHost}:${httpUpstreamPort}, WS / -> ${tcpUpstreamHost}:${tcpUpstreamPort}, /if3/ -> ${if3EditorHost}:${if3EditorPort})`);
+if (server2) {
+    console.log(`proxy world 2 on http://${server2.hostname}:${server2.port} WS / -> ${tcpUpstreamHost}:${tcpUpstreamPort2}`);
+}
