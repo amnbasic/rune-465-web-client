@@ -4,6 +4,8 @@ import JagException from '#/callstack/JagException.js';
 import ClientBuild from '#/client/ClientBuild.js';
 import ClanChannelUser from '#/client/ClanChannelUser.js';
 import ControlBar, { TABS } from '#/client/ControlBar.js';
+import If3Live from '#/client/If3Live.js';
+import If3Studio from '#/client/If3Studio.js';
 import ClientScript from '#/client/ClientScript.js';
 import ClientDynamicProvider from '#/client/ClientDynamicProvider.js';
 import ClientInvCache from '#/client/ClientInvCache.js';
@@ -119,6 +121,7 @@ const enum ClientMainState {
     LOADING = 0,
     TITLE_LOADING = 5,
     TITLE = 10,
+    STUDIO = 12,
     LOGIN = 20,
     MAP_BUILD = 25,
     GAME = 30,
@@ -154,11 +157,11 @@ export class Client extends GameShell {
     // the chatbox; '/' ':' ';' '?' open it and pass through. Enter (send) or Escape leaves
     // typing mode. Toggle WASD with ::wasd, the title-screen button or the control bar.
     static wasdMode: boolean = true;
-    // Display tab of the settings panel; drawn in the viewport's top-left by gameDrawMain.
+    // Display tab (Debug) of the settings panel; drawn in the viewport's top-left by gameDrawMain.
     static showFpsCounter: boolean = false;
-    // Display tab / ::grounditems; drawn over each pile by groundItemOverlays.
+    // Game tab / ::grounditems; drawn over each pile by groundItemOverlays.
     static showGroundItems: boolean = true;
-    // Display tab / ::groundmenu; collapses a pile's repeated right-click lines into "Coal x 9".
+    // Game tab / ::groundmenu; collapses a pile's repeated right-click lines into "Coal x 9".
     static groundItemMenu: boolean = true;
     // Display tab / ::roofs. ON is the cache's own behaviour - roofs are drawn, and roofCheck
     // hides the level above you the moment you or the camera line crosses a roof tile. OFF never
@@ -218,7 +221,10 @@ export class Client extends GameShell {
     private static loginFailCount: number = 0;
     private static loginSocketRetryAt: number = 0;
     private static loginHopTimer: number = 0;
-    static loginHost: string = '127.0.0.1';
+    static loginHost: string = '';
+    static connectHost(): string {
+        return Client.loginHost.length > 0 ? Client.loginHost : window.location.host;
+    }
     static npc: (ClientNpc | null)[] = new Array(32768).fill(null);
     static npcCount: number = 0;
     static npcIds: Int32Array = new Int32Array(32768);
@@ -458,6 +464,10 @@ export class Client extends GameShell {
     static keypresses: number = 0;
     static keypressKeychars: Int32Array = new Int32Array(128);
     static keypressKeycodes: Int32Array = new Int32Array(128);
+    /** IF3 TEXT with clientcode 1410 — drop-viewer search field. */
+    static inputCom: IfType | null = null;
+    /** This frame's click landed on the drop-viewer search field. */
+    static dropSearchHit: boolean = false;
     static chatDisplayName: string | null = null;
     static chatOwnerName: string | null = null;
     static minimapLevel: number = -1;
@@ -727,6 +737,57 @@ export class Client extends GameShell {
             Client.redrawAllComponents();
         };
         ControlBar.init();
+        If3Live.dirty = Client.componentUpdated;
+        If3Live.redraw = Client.redrawAllComponents;
+        If3Live.openWidgets = (): number[] => {
+            const ids = new Set<number>();
+            if (Client.toplevelinterface >= 0) {
+                ids.add(Client.toplevelinterface);
+            }
+            for (let sub = Client.subinterfaces.search() as SubInterface | null; sub !== null; sub = Client.subinterfaces.findnext() as SubInterface | null) {
+                ids.add(sub.id);
+            }
+            return [...ids];
+        };
+        if (If3Studio.wanted()) {
+            If3Studio.init();
+            If3Studio.resetAnim = Client.ifAnimReset;
+            If3Studio.layout = (): void => {
+                Client.toplevelinterface = If3Studio.widget;
+                if (IfType.open[If3Studio.widget]) {
+                    Client.computeTopLevelInterfaceLayout();
+                }
+            };
+            // Bypass the dirty-rect paint gate (GRAPHIC/TEXT/MODEL only draw if
+            // componentRedraw[slot] or this is > 1). Studio always wants a full frame.
+            Client.componentRectDebug = 2;
+            If3Studio.notifyVarp = (id: number, value: number): void => {
+                if (id < 0 || id >= VarCache.var.length) {
+                    return;
+                }
+                VarCache.varServ[id] = value;
+                VarCache.var[id] = value;
+                Client.clientVar(id);
+                Client.varTransmit[Client.varTransmitNum++ & 0x1f] = id;
+            };
+            If3Studio.notifyVarbit = (id: number, value: number): void => {
+                VarCache.setVarbit(id, value);
+                const vb = VarBitType.list(id);
+                Client.clientVar(vb.basevar);
+                Client.varTransmit[Client.varTransmitNum++ & 0x1f] = vb.basevar;
+            };
+            If3Studio.onOpened = (id: number): void => {
+                ScriptRunner.executeOnLoad(id);
+            };
+        } else {
+            If3Live.init();
+            try {
+                const ch = new BroadcastChannel('if3-pack');
+                ch.onmessage = (): void => Client.reloadPackedInterfaces();
+            } catch {
+                /* BroadcastChannel missing */
+            }
+        }
         Client.registerHotkeys();
         Client.wasdMode = ControlBar.settings.wasd;
         Client.showFpsCounter = ControlBar.settings.fps;
@@ -801,7 +862,7 @@ export class Client extends GameShell {
             Client.affid = affid;
         } catch {}
         Client.settings = this.getParameter('settings') ?? '';
-        Client.loginHost = this.getCodeBase().hostname;
+        Client.loginHost = window.location.host;
         this.startCommon(765, 503, 500);
     }
 
@@ -872,6 +933,9 @@ export class Client extends GameShell {
             GameShell.doneslowupdate();
         } else if (Client.state === ClientMainState.TITLE) {
             TitleScreen.loop(this);
+        } else if (Client.state === ClientMainState.STUDIO) {
+            If3Studio.tick();
+            Client.studioScripts();
         } else if (Client.state === ClientMainState.LOGIN) {
             TitleScreen.loop(this);
             await this.loginPoll();
@@ -908,6 +972,7 @@ export class Client extends GameShell {
         // around it. So the surface grows when the game frame itself arrives — one transition, at
         // the moment the player clicks through to the world.
         ScreenMode.gameFrame = Client.state === ClientMainState.GAME && Client.toplevelinterface === 548;
+        ScreenMode.skipCss = If3Studio.enabled;
         ScreenMode.tick();
 
         const loaded = MidiManager.updateLoading();
@@ -948,6 +1013,8 @@ export class Client extends GameShell {
                 // render loop (and the 3D scene) alive instead of crashing the tab. Log the first few.
                 if (Client.dbgGameDrawErrs++ < 4) console.error('gameDraw threw:', e);
             }
+        } else if (Client.state === ClientMainState.STUDIO) {
+            this.studioDraw();
         } else if (Client.state === ClientMainState.RECONNECT) {
             Client.messageBox(Text.conlost + '<br>' + Text.attempt_to_reestablish, false);
         }
@@ -1077,7 +1144,7 @@ export class Client extends GameShell {
                 const token = this.js5SocketToken;
                 Client.js5SocketReq = new Promise<WebSocket>((resolve, reject): void => {
                     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-                    const socket = new WebSocket(`${protocol}://${window.location.host}`, 'binary');
+                    const socket = new WebSocket(`${protocol}://${Client.connectHost()}`, 'binary');
                     socket.addEventListener('open', (): void => {
                         resolve(socket);
                     });
@@ -1670,7 +1737,11 @@ export class Client extends GameShell {
             Client.fontmetrics!.discardNames(true);
             Client.binary!.discardNames(true);
             Client.interfaces!.discardNames(true);
-            Client.setMainState(ClientMainState.TITLE);
+            if (If3Studio.enabled) {
+                Client.setMainState(ClientMainState.STUDIO);
+            } else {
+                Client.setMainState(ClientMainState.TITLE);
+            }
         }
     }
 
@@ -1709,7 +1780,7 @@ export class Client extends GameShell {
                     const token = this.loginSocketToken;
                     Client.loginSocketReq = new Promise<WebSocket>((resolve, reject): void => {
                         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-                        const socket = new WebSocket(`${protocol}://${window.location.host}`, 'binary');
+                        const socket = new WebSocket(`${protocol}://${Client.connectHost()}`, 'binary');
                         socket.addEventListener('open', (): void => {
                             resolve(socket);
                         });
@@ -2264,6 +2335,9 @@ export class Client extends GameShell {
 
         Client.keypresses = 0;
         while (ClientKeyboardListener.pollKey() && Client.keypresses < 128) {
+            if (Client.handleIfaceTextInput(ClientKeyboardListener.code, ClientKeyboardListener.ch)) {
+                continue;
+            }
             if (Client.filterKey(ClientKeyboardListener.code, ClientKeyboardListener.ch)) {
                 continue;
             }
@@ -2281,6 +2355,7 @@ export class Client extends GameShell {
         if (Client.toplevelinterface !== -1) {
             Client.loopInterface(0, GameShell.sHei, 0, 0, GameShell.sWid, Client.toplevelinterface, 0);
         }
+        Client.finishDropSearchClick();
 
         Client.transmitNum++;
         const isLiveHookRequest = (req: HookReq): boolean => {
@@ -2514,9 +2589,11 @@ export class Client extends GameShell {
             // the layout pass (computeInterfaceLayout, for a root draw with no offsets) — so
             // writing them here means they take effect in this same frame rather than the next.
             Client.stampMobileLayout();
+            If3Live.beginFrame();
             this.drawInterface(GameShell.sHei, Client.toplevelinterface, 0, -1, 0, 0, 0, GameShell.sWid);
         }
         Pix2D.resetClipping();
+        If3Live.drawHighlight();
         // THE HOTKEY ROW IS DRAWN HERE, after the pane and outside every component's clip, for
         // two reasons that both bit the first attempt.
         //
@@ -2548,6 +2625,63 @@ export class Client extends GameShell {
         }
         BgSound.doMix(Client.localPlayer!.z, Client.worldUpdateNum, Client.localPlayer!.x, Client.minusedlevel);
         Client.worldUpdateNum = 0;
+    }
+
+    studioDraw(): void {
+        const mobile = document.getElementById('mobile-bar');
+        if (mobile) {
+            mobile.style.display = 'none';
+        }
+        GameShell.drawArea.bind();
+        Pix2D.resetClipping();
+        Pix2D.fillRect(0, 0, GameShell.sWid, GameShell.sHei, 0x202020);
+        // gameDraw copies dirty → redraw before drawInterface; painting of GRAPHIC/TEXT/MODEL
+        // is gated on componentRedraw[slot]. Studio has no dirty tracker, so mark every slot.
+        Client.componentRedraw.fill(true);
+        Client.componentDirtyArea.fill(true);
+        Client.componentDrawCount = 0;
+        Client.componentDrawTime = Client.loopCycle;
+        If3Live.beginFrame();
+        if (If3Studio.ensureOpen()) {
+            Client.toplevelinterface = If3Studio.widget;
+            try {
+                this.drawInterface(GameShell.sHei, If3Studio.widget, 0, -1, 0, 0, 0, GameShell.sWid);
+            } catch (e) {
+                if (Client.dbgGameDrawErrs++ < 4) {
+                    console.error('studioDraw threw:', e);
+                }
+            }
+        }
+        Pix2D.resetClipping();
+        If3Live.drawHighlight();
+    }
+
+    static studioScripts(): void {
+        Client.worldUpdateNum = 1;
+        Client.transmitNum++;
+        if (Client.toplevelinterface !== -1) {
+            try {
+                Client.loopInterface(0, GameShell.sHei, 0, 0, GameShell.sWid, Client.toplevelinterface, 0);
+            } catch (e) {
+                if (Client.dbgGameDrawErrs++ < 4) {
+                    console.error('studio loopInterface:', e);
+                }
+            }
+        }
+        Client.finishDropSearchClick();
+        while (true) {
+            const req = Client.hookRequests.popFront();
+            if (!req) {
+                break;
+            }
+            try {
+                ScriptRunner.executeScript(req, 200000);
+            } catch (e) {
+                if (Client.dbgGameDrawErrs++ < 4) {
+                    console.error('studio cs2:', e);
+                }
+            }
+        }
     }
 
     // jag::oldscape::Client::LoginDone
@@ -6170,11 +6304,7 @@ export class Client extends GameShell {
                 }
                 const nhComId: number = Client.in.g4();
                 const nhCom: IfType | null = IfType.get(nhComId);
-                if (nhCom !== null && (nhCom.model1Type !== 2 || nhCom.model1Id !== nhNpc)) {
-                    nhCom.model1Id = nhNpc;
-                    nhCom.model1Type = 2;
-                    Client.componentUpdated(nhCom);
-                }
+                Client.applyIfaceNpc(nhCom, nhNpc);
                 Client.ptype = -1;
                 return true;
             }
@@ -6821,11 +6951,7 @@ export class Client extends GameShell {
                 }
 
                 const com = IfType.get(comId)!;
-                if (com.model1Type !== 2 || com.model1Id !== npcId) {
-                    com.model1Id = npcId;
-                    com.model1Type = 2;
-                    Client.componentUpdated(com);
-                }
+                Client.applyIfaceNpc(com, npcId);
 
                 Client.ptype = -1;
                 return true;
@@ -7060,6 +7186,13 @@ export class Client extends GameShell {
 
             if (Client.ptype === 117) {
                 const message: string = Client.in.gjstr();
+
+                if (message === ':if3reload:' || message.endsWith(':if3reload:')) {
+                    Client.reloadPackedInterfaces();
+                    Client.addChat('Reloading packed interfaces from JS5.', 0, '');
+                    Client.ptype = -1;
+                    return true;
+                }
 
                 if (message.endsWith(':tradereq:')) {
                     const player: string = message.substring(0, message.indexOf(':'));
@@ -9292,6 +9425,118 @@ export class Client extends GameShell {
         }
     }
 
+    /** Type into drop-viewer search (clientcode 1410). True = consumed. */
+    private static handleIfaceTextInput(code: number, ch: number): boolean {
+        if (If3Studio.enabled) {
+            return false;
+        }
+        let com = Client.inputCom;
+        if (com !== null && com.clientCode === 1410) {
+            com = Client.dropSearchText(com);
+            Client.inputCom = com;
+        }
+        if (com === null || com.clientCode !== 1410 || com.type !== 4) {
+            return false;
+        }
+        if (code === 0) {
+            Client.inputCom = null;
+            return true;
+        }
+        let t = com.text ?? '';
+        // Jagex keycode 85 is Backspace (TitleScreen / KEY_CODE_MAP). ASCII 8 is the
+        // keypress char some browsers still deliver. code 8 is not Backspace here.
+        if (code === 85 || ch === 8) {
+            if (t.length === 0) {
+                return true;
+            }
+            t = t.slice(0, -1);
+        } else if (ch >= 32 && ch < 127) {
+            if (t.length < 24) {
+                t += String.fromCharCode(ch);
+            }
+        } else if (code === 84) {
+            return true;
+        } else if (code !== -1 && ch === -1) {
+            return true;
+        } else {
+            return true;
+        }
+        com.text = t;
+        com.colour = t.length > 0 ? 0xffffff : 0x808080;
+        Client.componentUpdated(com);
+        Client.out.p1Enc(ClientProt.RESUME_P_STRINGDIALOG);
+        Client.out.p1(Packet.pjstrlen(t));
+        Client.out.pjstr(t);
+        return true;
+    }
+
+    private static dropSearchText(com: IfType): IfType {
+        if (com.type === 4) {
+            return com;
+        }
+        const widget = (com.parentId >>> 16) & 0xffff;
+        const list = IfType.list[widget];
+        if (list) {
+            for (let i = 0; i < list.length; i++) {
+                const c = list[i];
+                if (c && c.clientCode === 1410 && c.type === 4) {
+                    return c;
+                }
+            }
+        }
+        return com;
+    }
+
+    /** After the iface walk: a click that missed Search returns keys to chat. */
+    private static finishDropSearchClick(): void {
+        if (ClientMouseListener.mouseClickButton === 1 && Client.inputCom !== null && Client.inputCom.clientCode === 1410 && !Client.dropSearchHit) {
+            Client.inputCom = null;
+        }
+        Client.dropSearchHit = false;
+    }
+
+    /** IF_SETNPCHEAD. clientcode 1412 (drop-viewer well) is a full body, not a chat head. */
+    private static applyIfaceNpc(com: IfType | null, npcId: number): void {
+        if (com === null) {
+            return;
+        }
+        const type = com.clientCode === 1412 ? 6 : 2;
+        if (com.model1Type !== type || com.model1Id !== npcId) {
+            com.model1Id = npcId;
+            com.model1Type = type;
+            Client.componentUpdated(com);
+        }
+    }
+
+    /**
+     * CSS-contain of the AABB. Returns zoom; does not write IfType (studio Save
+     * dumps those fields).
+     */
+    private static fitDropNpcZoom(child: IfType, model: ModelLit): number {
+        let halfW = 32;
+        let halfH = 32;
+        let halfD = 32;
+        if (model instanceof SoftwareModelLit) {
+            if (!model.boundsCalculated) {
+                model.method844();
+            }
+            halfW = Math.max(1, ((model.maxX - model.minX) / 2) | 0);
+            halfH = Math.max(1, ((model.maxY - model.field2277) / 2) | 0);
+            halfD = Math.max(1, ((model.maxZ - model.minZ) / 2) | 0);
+        } else {
+            halfH = Math.max(1, Math.abs(model.method88()) | 0);
+            halfW = halfH;
+            halfD = halfH;
+        }
+        const halfXz = Math.max(halfW, halfD);
+        const fillW = Math.max(8, ((Math.max(8, child.renderWidth) * 90) / 100) | 0);
+        const fillH = Math.max(8, ((Math.max(8, child.renderHeight) * 90) / 100) | 0);
+        const cos = Math.max(16384, Pix3D.cosTable[150]);
+        const zoomH = ((halfH * 2 * 512 * 65536) / (cos * fillH)) | 0;
+        const zoomW = ((halfXz * 2 * 512 * 65536) / (cos * fillW)) | 0;
+        return Math.max(200, Math.min(16000, Math.max(zoomH, zoomW)));
+    }
+
     /**
      * QoL typing gate. True = the key was consumed here (drop it from the queue).
      * Branch order is load-bearing — see the comments on each branch.
@@ -9415,6 +9660,10 @@ export class Client extends GameShell {
 
     // jag::oldscape::minimenu::Minimenu::GameLoop
     mouseLoop(): void {
+        if (If3Live.consumeClick(ClientMouseListener.mouseClickButton)) {
+            ClientMouseListener.mouseClickButton = 0;
+            return;
+        }
         if (Client.objDragCom !== null || Client.dragCom !== null) {
             return;
         }
@@ -11195,6 +11444,7 @@ export class Client extends GameShell {
 
             let childX: number = x + child.renderX;
             let childY: number = y + child.renderY;
+            If3Live.noteDraw(child, childX, childY, child.renderWidth, child.renderHeight);
 
             let trans: number = child.trans;
             if (Client.qaOpTest && (Client.getActive(child) !== 0 || child.type === 0) && trans > 127) {
@@ -11396,7 +11646,7 @@ export class Client extends GameShell {
                 Pix3D.setRenderClipping();
             }
             if (Client.componentRedraw[drawSlot] || Client.componentRectDebug > 1) {
-                if (child.type === 0 && !child.v3 && child.renderHeight < child.scrollHeight) {
+                if (child.type === 0 && child.renderHeight < child.scrollHeight) {
                     Client.drawScrollbar(child.scrollPosY, child.renderHeight, childY, child.scrollHeight, childX + child.renderWidth);
                 }
                 if (child.type !== 1) {
@@ -11752,14 +12002,14 @@ export class Client extends GameShell {
                                 }
                             }
                         } else if (seqId === -1) {
-                            model = child.getTempModel(null, Client.localPlayer!.model, -1, active);
+                            model = child.getTempModel(null, Client.localPlayer?.model ?? null, -1, active);
                             if (model === null && IfType.loadingAsset) {
                                 ready = false;
                                 Client.componentUpdated(child);
                             }
                         } else {
                             const seq: SeqType = SeqType.list(seqId);
-                            model = child.getTempModel(seq, Client.localPlayer!.model, child.animFrame, active);
+                            model = child.getTempModel(seq, Client.localPlayer?.model ?? null, child.animFrame, active);
                             if (model === null && IfType.loadingAsset) {
                                 ready = false;
                                 Client.componentUpdated(child);
@@ -11767,23 +12017,44 @@ export class Client extends GameShell {
                         }
 
                         if (model) {
+                            let xan = child.modelXAn;
+                            let yan = child.modelYAn;
+                            let zoom = child.modelZoom;
+                            if (child.clientCode === 1412 && model instanceof ModelLit) {
+                                xan = 150;
+                                yan = (Client.loopCycle << 1) & 0x7ff;
+                                zoom = Client.fitDropNpcZoom(child, model);
+                                if (model instanceof SoftwareModelLit) {
+                                    if (!model.boundsCalculated) {
+                                        model.method844();
+                                    }
+                                    modelYOffset = -(((model.maxY + model.field2277) / 2) | 0);
+                                }
+                                Pix2D.setClipping(childClipLeft, childClipTop, childClipRight, childClipBottom);
+                                Pix3D.setRenderClipping();
+                            } else if (If3Studio.enabled && If3Studio.spin && If3Live.com === child && child.type === 6) {
+                                yan = (yan + ((Client.loopCycle * 16) & 2047)) & 2047;
+                            }
                             const scaleY: number = child.modelBaseHeight <= 0 ? 256 : ((child.renderHeight << 8) / child.modelBaseHeight) | 0;
                             const scaleX: number = child.modelBaseWidth <= 0 ? 256 : ((child.renderWidth << 8) / child.modelBaseWidth) | 0;
                             const originX: number = ((child.renderWidth / 2) | 0) + childX + ((scaleX * child.modelXOf) >> 8);
                             const originY: number = ((scaleY * child.modelYOf) >> 8) + ((child.renderHeight / 2) | 0) + childY;
                             Pix3D.setOrigin(originX, originY);
-                            const eyeZ: number = (child.modelZoom * Pix3D.cosTable[child.modelXAn]) >> 16;
-                            const eyeY: number = (Pix3D.sinTable[child.modelXAn] * child.modelZoom) >> 16;
+                            const eyeZ: number = (zoom * Pix3D.cosTable[xan]) >> 16;
+                            const eyeY: number = (Pix3D.sinTable[xan] * zoom) >> 16;
                             if (model instanceof ModelLit) {
                                 if (!child.v3) {
-                                    model.method193(child.modelYAn, 0, child.modelXAn, 0, eyeY, eyeZ);
+                                    model.method193(yan, 0, xan, 0, eyeY, eyeZ);
                                 } else if (child.orthog && model instanceof SoftwareModelLit) {
-                                    model.objRender(child.modelYAn, child.modelZAn, child.modelXAn, child.field3365, modelYOffset + eyeY + child.field3498, eyeZ + child.field3498, child.modelZoom);
+                                    model.objRender(yan, child.modelZAn, xan, child.field3365, modelYOffset + eyeY + child.field3498, eyeZ + child.field3498, zoom);
                                 } else {
-                                    model.method193(child.modelYAn, child.modelZAn, child.modelXAn, child.field3365, child.field3498 + eyeY + modelYOffset, child.field3498 + eyeZ);
+                                    model.method193(yan, child.modelZAn, xan, child.field3365, child.field3498 + eyeY + modelYOffset, child.field3498 + eyeZ);
                                 }
                             }
                             Pix3D.resetOrigin();
+                            if (child.clientCode === 1412) {
+                                Pix2D.setClipping(clipLeft, clipTop, clipRight, clipBottom);
+                            }
                         }
 
                         Pix3D.originX = tmpX;
@@ -12309,7 +12580,7 @@ export class Client extends GameShell {
     static loopLayer(arg0: number, arg1: number, arg2: number, arg3: number, arg4: number, arg5: IfType[], arg6: number, arg7: number): void {
         for (let var8: number = 0; var8 < arg5.length; var8++) {
             const var9: IfType | null = arg5[var8];
-            if (var9 !== null && (!var9.v3 || var9.type === 0 || var9.hashook || Client.getActive(var9) !== 0 || Client.dragLayer === var9 || var9.clientCode === 1338) && arg3 === var9.layerId && (!var9.v3 || !Client.hide(var9))) {
+            if (var9 !== null && (!var9.v3 || var9.type === 0 || var9.hashook || Client.getActive(var9) !== 0 || Client.dragLayer === var9 || var9.clientCode === 1338 || var9.clientCode === 1410) && arg3 === var9.layerId && (!var9.v3 || !Client.hide(var9))) {
                 const var10: number = arg2 + var9.renderX;
                 const var11: number = arg7 + var9.renderY;
                 let var12: number;
@@ -12372,6 +12643,13 @@ export class Client extends GameShell {
                         }
                         if (ClientMouseListener.mouseClickButton === 1 && var15 <= ClientMouseListener.mouseClickX && ClientMouseListener.mouseClickY >= var12 && ClientMouseListener.mouseClickX < var17 && var16 > ClientMouseListener.mouseClickY) {
                             var21 = true;
+                        }
+                        if (var21 && var9.clientCode === 1410) {
+                            Client.inputCom = Client.dropSearchText(var9);
+                            Client.dropSearchHit = true;
+                        }
+                        if (var9.type === 0 && var9.renderHeight < var9.scrollHeight) {
+                            Client.doScrollbar(var10 + var9.renderWidth, var9.scrollHeight, ClientMouseListener.mouseX, var9.renderHeight, ClientMouseListener.mouseY, var9, var11);
                         }
                         if (ClientMouseListener.mouseButton === 1 && var22) {
                             var20 = true;
@@ -12860,6 +13138,26 @@ export class Client extends GameShell {
         return var1;
     }
 
+    /** Patch open widgets from the authored .if3 (does not wait on JS5 CRC). */
+    static reloadPackedInterfaces(): void {
+        const ids = If3Live.openWidgets();
+        void (async () => {
+            let n = 0;
+            for (const id of ids) {
+                if (await If3Studio.applyAuthoredToWidget(id)) {
+                    n++;
+                }
+            }
+            Client.componentDirtyArea.fill(true);
+            Client.redrawAllComponents();
+            if (n > 0) {
+                Client.addChat('Updated ' + n + ' saved interface(s).', 0, '');
+            } else {
+                Client.addChat('No open interface matched a saved .if3. ::iface first.', 0, '');
+            }
+        })();
+    }
+
     // jag::oldscape::Client::IfAnimReset
     static ifAnimReset(arg0: number): void {
         if (!IfType.openInterface(arg0)) {
@@ -12928,7 +13226,10 @@ export class Client extends GameShell {
                             }
                         }
                     }
-                    if (var3.modelSpin !== 0 && !var3.v3) {
+                    if (var3.v3 && var3.type === 6 && var3.modelAnim !== -1 && var3.modelZoom >= 1600) {
+                        var3.modelYAn = (var3.modelYAn + 4 * Client.worldUpdateNum) & 0x7ff;
+                        Client.componentUpdated(var3);
+                    } else if (var3.modelSpin !== 0 && !var3.v3) {
                         const var8: number = (var3.modelSpin << 16) >> 16;
                         const var9: number = var3.modelSpin >> 16;
                         const var10: number = var9 * Client.worldUpdateNum;
@@ -13150,6 +13451,9 @@ export class Client extends GameShell {
     static closeSubInterface(arg0: SubInterface, arg1: boolean): void {
         const var2 = arg0.id;
         const var3 = Number(arg0.key);
+        if (var2 === 589) {
+            Client.inputCom = null;
+        }
         arg0.unlink();
         if (arg1) {
             IfType.unloadInterface(var2);
@@ -14201,6 +14505,9 @@ export class Client extends GameShell {
 
     // jag::oldscape::Client::Hide
     static hide(arg0: IfType): boolean {
+        if (If3Studio.enabled) {
+            return If3Studio.showHidden ? false : arg0.hide;
+        }
         if (Client.qaOpTest) {
             if (Client.getActive(arg0) !== 0) {
                 return false;

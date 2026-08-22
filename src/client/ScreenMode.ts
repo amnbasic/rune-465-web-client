@@ -146,6 +146,12 @@ export default class ScreenMode {
      * `resizable`: the preference persists, this does not.
      */
     static gameFrame: boolean = false;
+    /**
+     * IF3 studio owns presentation (`If3Studio.fitGame` crop-scales the 765×503 frame into
+     * `#if3-stage`). tick() still keeps the backing store at FIXED_W×FIXED_H, but must not
+     * also CSS-fit the canvas to the window — that double-scaled overlays into a postage stamp.
+     */
+    static skipCss: boolean = false;
 
     /** The baseline viewport pane 548 carries, and what the projection focal is baked for. */
     static readonly BASE_VIEW_W: number = 512;
@@ -270,6 +276,11 @@ export default class ScreenMode {
      */
     static tick(): void {
         ScreenMode.bindListeners();
+        if (ScreenMode.skipCss) {
+            ScreenMode.applySize(ScreenMode.FIXED_W, ScreenMode.FIXED_H);
+            ScreenMode.applyCssNative();
+            return;
+        }
         if (!ScreenMode.resizable || !ScreenMode.gameFrame) {
             // Fixed: the cache baseline, letterboxed. This is also where the title and login
             // screens live even with the resizable preference on - see `gameFrame`.
@@ -506,6 +517,26 @@ export default class ScreenMode {
         canvas.style.height = cssH;
         GlRenderer.setCssSize(cssW, cssH);
         ScreenMode.applyPresentation(GameShell.sWid > 0 ? winW / GameShell.sWid : 1, true);
+    }
+
+    /** 1:1 CSS = backing store. Studio then crop-scales `#game` into the stage. */
+    private static applyCssNative(): void {
+        const canvas = GameShell.canvas;
+        if (!canvas) {
+            return;
+        }
+        const key = 'native' + ScreenMode.FIXED_W + 'x' + ScreenMode.FIXED_H;
+        if (key === ScreenMode.appliedCss) {
+            return;
+        }
+        ScreenMode.appliedCss = key;
+        ScreenMode.frameScale = 1;
+        const cssW = ScreenMode.FIXED_W + 'px';
+        const cssH = ScreenMode.FIXED_H + 'px';
+        canvas.style.width = cssW;
+        canvas.style.height = cssH;
+        GlRenderer.setCssSize(cssW, cssH);
+        ScreenMode.applyPresentation(1, false);
     }
 
     /**

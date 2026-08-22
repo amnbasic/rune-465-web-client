@@ -39,6 +39,18 @@ export default class Js5Loader extends Js5 {
         this.net.registerProvider(this.archive, this);
     }
 
+    /** Allow a second 255:this.archive fetch after the master CRC table is re-pulled. */
+    invalidateIndex(): void {
+        this.loadStatus = false;
+        this.loadedGroups = [];
+        if (this.packed) {
+            for (let i = 0; i < this.packed.length; i++) {
+                this.packed[i] = null;
+            }
+        }
+        this.discardAllFiles();
+    }
+
     requestIndex(crc: number, version: number): void {
         this.indexCrc = crc;
         this.indexVersion = version;

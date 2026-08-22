@@ -377,6 +377,18 @@ export default class Js5Net {
         }
     }
 
+    /** Re-pull 255:255 so archive CRCs (idx3 overlays) update without a tab reload. */
+    refetchMasterIndex(): void {
+        const key = 255 + (255 << 16);
+        this.urgentQueue.delete(key);
+        this.pendingUrgentQueue.delete(key);
+        this.prefetchQueue.delete(key);
+        this.pendingPrefetchQueue.delete(key);
+        this.requestQueue = this.requestQueue.filter(queued => queued.key !== key);
+        this.masterIndexBuffer = null;
+        this.queueRequest(null, 255, 255, 0, 0, true);
+    }
+
     registerProvider(archive: number, loader: Js5Loader): void {
         if (!this.masterIndexBuffer) {
             this.queueRequest(null, 255, 255, 0, 0, true);

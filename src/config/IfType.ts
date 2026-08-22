@@ -213,6 +213,13 @@ export default class IfType {
         IfType.fontCache.clear();
     }
 
+    /** Drop decoded widgets so the next openInterface re-fetches idx3. */
+    static dropAll(): void {
+        IfType.open = [];
+        IfType.list = [];
+        IfType.resetCache();
+    }
+
     static init(arg0: Js5, arg1: Js5, arg2: Js5, arg3: Js5): void {
         IfType.models = arg3;
         IfType.field1176 = arg0;
